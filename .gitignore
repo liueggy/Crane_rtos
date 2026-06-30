@@ -1,0 +1,47 @@
+# Build directories
+/build/
+/cmake-build-*/
+/out/
+
+# CMake and Ninja generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Embedded build artifacts
+*.elf
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.list
+*.o
+*.obj
+*.d
+*.dep
+*.su
+
+# IDE and editor state
+/.idea/
+/.vscode/
+*.user
+*.suo
+*.swp
+*~
+
+# STM32CubeMX generated project cache
+/.mxproject
+
+# Local agent/runtime state
+/.omx/
+/.understand-anything/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
