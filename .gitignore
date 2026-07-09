@@ -39,6 +39,7 @@ build.ninja
 
 # Local agent/runtime state
 /.omx/
+/.omo/
 /.understand-anything/
 
 # OS metadata

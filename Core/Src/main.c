@@ -59,32 +59,46 @@ TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart2;
 
+/* Definitions for APP_CTRL */
+osThreadId_t APP_CTRLHandle;
+const osThreadAttr_t APP_CTRL_attributes = {
+  .name = "APP_CTRL",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for DC_MOTOR */
+osThreadId_t DC_MOTORHandle;
+const osThreadAttr_t DC_MOTOR_attributes = {
+  .name = "DC_MOTOR",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for STEPPER */
+osThreadId_t STEPPERHandle;
+const osThreadAttr_t STEPPER_attributes = {
+  .name = "STEPPER",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for K230_RX */
+osThreadId_t K230_RXHandle;
+const osThreadAttr_t K230_RX_attributes = {
+  .name = "K230_RX",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for INPUT_EVT */
+osThreadId_t INPUT_EVTHandle;
+const osThreadAttr_t INPUT_EVT_attributes = {
+  .name = "INPUT_EVT",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
 /* Definitions for OLED */
 osThreadId_t OLEDHandle;
 const osThreadAttr_t OLED_attributes = {
   .name = "OLED",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for STEP_MOTOR_1 */
-osThreadId_t STEP_MOTOR_1Handle;
-const osThreadAttr_t STEP_MOTOR_1_attributes = {
-  .name = "STEP_MOTOR_1",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityLow,
-};
-/* Definitions for KEY_READ */
-osThreadId_t KEY_READHandle;
-const osThreadAttr_t KEY_READ_attributes = {
-  .name = "KEY_READ",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityLow,
-};
-/* Definitions for LED */
-osThreadId_t LEDHandle;
-const osThreadAttr_t LED_attributes = {
-  .name = "LED",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* USER CODE BEGIN PV */
@@ -101,10 +115,12 @@ static void MX_I2C1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
-void StartDefaultTask(void *argument);
-void StartTask02(void *argument);
-void StartTask03(void *argument);
-void StartTask04(void *argument);
+void StartAppCtrlTask(void *argument);
+void StartDcMotorTask(void *argument);
+void StartStepperTask(void *argument);
+void StartK230RxTask(void *argument);
+void StartInputEvtTask(void *argument);
+void StartOledTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -207,13 +223,44 @@ int main(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   Servo_SetPulseUs(SERVO_LOW_PULSE_US);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_LOW_PULSE_US);
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   StepMotor_ApplyRunState();
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, STEP_MOTOR_STOP_PULSE);
+
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
 
   /* USER CODE END 2 */
 
@@ -237,17 +284,23 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
+  /* creation of APP_CTRL */
+  APP_CTRLHandle = osThreadNew(StartAppCtrlTask, NULL, &APP_CTRL_attributes);
+
+  /* creation of DC_MOTOR */
+  DC_MOTORHandle = osThreadNew(StartDcMotorTask, NULL, &DC_MOTOR_attributes);
+
+  /* creation of STEPPER */
+  STEPPERHandle = osThreadNew(StartStepperTask, NULL, &STEPPER_attributes);
+
+  /* creation of K230_RX */
+  K230_RXHandle = osThreadNew(StartK230RxTask, NULL, &K230_RX_attributes);
+
+  /* creation of INPUT_EVT */
+  INPUT_EVTHandle = osThreadNew(StartInputEvtTask, NULL, &INPUT_EVT_attributes);
+
   /* creation of OLED */
-  OLEDHandle = osThreadNew(StartDefaultTask, NULL, &OLED_attributes);
-
-  /* creation of STEP_MOTOR_1 */
-  STEP_MOTOR_1Handle = osThreadNew(StartTask02, NULL, &STEP_MOTOR_1_attributes);
-
-  /* creation of KEY_READ */
-  KEY_READHandle = osThreadNew(StartTask03, NULL, &KEY_READ_attributes);
-
-  /* creation of LED */
-  LEDHandle = osThreadNew(StartTask04, NULL, &LED_attributes);
+  OLEDHandle = osThreadNew(StartOledTask, NULL, &OLED_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -725,77 +778,87 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE BEGIN Header_StartAppCtrlTask */
 /**
-  * @brief  Function implementing the defaultTask thread.
+  * @brief  Application state/control task.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
+/* USER CODE END Header_StartAppCtrlTask */
+void StartAppCtrlTask(void *argument)
 {
-  /* USER CODE BEGIN 5 */
-  uint8_t high_angle = 0U;
-
-  osDelay(20);
-  OLED_Init(&hi2c1, OLED_I2C_ADDRESS);
-  OLED_NewFrame();
-  OLED_PrintASCIIString(0, 0, "Crane RTOS", &afont16x8, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 18, "K0 Run/Stop", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 30, "K1 Direction", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 42, "Motor: STOP", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 54, "Dir: FWD", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_ShowFrame();
-
-  /* Infinite loop */
-  for(;;)
+  /* USER CODE BEGIN StartAppCtrlTask */
+  for (;;)
   {
-    Servo_SetPulseUs(high_angle ? SERVO_HIGH_PULSE_US : SERVO_LOW_PULSE_US);
-
-    OLED_NewFrame();
-    OLED_PrintASCIIString(0, 0, "Crane RTOS", &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 18, high_angle ? "Servo: HIGH" : "Servo: LOW ", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 30, g_motor_run ? "Motor: RUN " : "Motor: STOP", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 42, Motor_IsReverseDirection() ? "Dir: REV" : "Dir: FWD", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 54, "K0:Run K1:Dir", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_ShowFrame();
-
-    high_angle ^= 1U;
-    osDelay(2000);
-  }
-  /* USER CODE END 5 */
-}
-
-/* USER CODE BEGIN Header_StartTask02 */
-/**
-* @brief Function implementing the STEP_MOTOR_1 thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask02 */
-void StartTask02(void *argument)
-{
-  /* USER CODE BEGIN StartTask02 */
-  /* Infinite loop */
-  for(;;)
-  {
-    StepMotor_ApplyRunState();
+    Led_ApplyRunState();
     osDelay(50);
   }
-  /* USER CODE END StartTask02 */
+  /* USER CODE END StartAppCtrlTask */
 }
 
-/* USER CODE BEGIN Header_StartTask03 */
+/* USER CODE BEGIN Header_StartDcMotorTask */
 /**
-* @brief Function implementing the KEY_READ thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask03 */
-void StartTask03(void *argument)
+  * @brief  Four-wheel DC motor control task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDcMotorTask */
+void StartDcMotorTask(void *argument)
 {
-  /* USER CODE BEGIN StartTask03 */
-  for(;;)
+  /* USER CODE BEGIN StartDcMotorTask */
+  for (;;)
+  {
+    osDelay(20);
+  }
+  /* USER CODE END StartDcMotorTask */
+}
+
+/* USER CODE BEGIN Header_StartStepperTask */
+/**
+  * @brief  Stepper axis control task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartStepperTask */
+void StartStepperTask(void *argument)
+{
+  /* USER CODE BEGIN StartStepperTask */
+  for (;;)
+  {
+    StepMotor_ApplyRunState();
+    osDelay(20);
+  }
+  /* USER CODE END StartStepperTask */
+}
+
+/* USER CODE BEGIN Header_StartK230RxTask */
+/**
+  * @brief  K230 UART receive/parse task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartK230RxTask */
+void StartK230RxTask(void *argument)
+{
+  /* USER CODE BEGIN StartK230RxTask */
+  for (;;)
+  {
+    osDelay(20);
+  }
+  /* USER CODE END StartK230RxTask */
+}
+
+/* USER CODE BEGIN Header_StartInputEvtTask */
+/**
+  * @brief  Button, limit, and safety input event task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartInputEvtTask */
+void StartInputEvtTask(void *argument)
+{
+  /* USER CODE BEGIN StartInputEvtTask */
+  for (;;)
   {
     if (g_key0_irq_pending)
     {
@@ -829,25 +892,47 @@ void StartTask03(void *argument)
 
     osDelay(KEY_POLL_IDLE_MS);
   }
-  /* USER CODE END StartTask03 */
+  /* USER CODE END StartInputEvtTask */
 }
 
-/* USER CODE BEGIN Header_StartTask04 */
+/* USER CODE BEGIN Header_StartOledTask */
 /**
-* @brief Function implementing the LED thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask04 */
-void StartTask04(void *argument)
+  * @brief  OLED status display task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartOledTask */
+void StartOledTask(void *argument)
 {
-  /* USER CODE BEGIN StartTask04 */
-  for(;;)
+  /* USER CODE BEGIN StartOledTask */
+  uint8_t high_angle = 0U;
+
+  osDelay(20);
+  OLED_Init(&hi2c1, OLED_I2C_ADDRESS);
+  OLED_NewFrame();
+  OLED_PrintASCIIString(0, 0, "Crane RTOS", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 18, "K0 Run/Stop", &afont12x6, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 30, "K1 Direction", &afont12x6, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 42, "Motor: STOP", &afont12x6, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 54, "Dir: FWD", &afont12x6, OLED_COLOR_NORMAL);
+  OLED_ShowFrame();
+
+  for (;;)
   {
-    Led_ApplyRunState();
-    osDelay(50);
+    Servo_SetPulseUs(high_angle ? SERVO_HIGH_PULSE_US : SERVO_LOW_PULSE_US);
+
+    OLED_NewFrame();
+    OLED_PrintASCIIString(0, 0, "Crane RTOS", &afont16x8, OLED_COLOR_NORMAL);
+    OLED_PrintASCIIString(0, 18, high_angle ? "Servo: HIGH" : "Servo: LOW ", &afont12x6, OLED_COLOR_NORMAL);
+    OLED_PrintASCIIString(0, 30, g_motor_run ? "Motor: RUN " : "Motor: STOP", &afont12x6, OLED_COLOR_NORMAL);
+    OLED_PrintASCIIString(0, 42, Motor_IsReverseDirection() ? "Dir: REV" : "Dir: FWD", &afont12x6, OLED_COLOR_NORMAL);
+    OLED_PrintASCIIString(0, 54, "K0:Run K1:Dir", &afont12x6, OLED_COLOR_NORMAL);
+    OLED_ShowFrame();
+
+    high_angle ^= 1U;
+    osDelay(2000);
   }
-  /* USER CODE END StartTask04 */
+  /* USER CODE END StartOledTask */
 }
 
 /**
