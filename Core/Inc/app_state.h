@@ -20,6 +20,9 @@ typedef struct
   uint8_t estop_active;
   uint8_t k230_online;
   uint8_t ui_page;
+  uint8_t stepper_enabled;
+  uint8_t stepper_direction_reverse;
+  uint16_t stepper_pulse;
   int32_t encoder_count[APP_MOTOR_COUNT];
   float target_rpm[APP_MOTOR_COUNT];
   float measured_rpm[APP_MOTOR_COUNT];
@@ -34,6 +37,8 @@ void AppState_SetRunEnabled(uint8_t enabled);
 uint8_t AppState_GetRunEnabled(void);
 void AppState_SetEstopActive(uint8_t active);
 void AppState_SetUiPage(uint8_t page);
+void AppState_SetStepperTelemetry(uint8_t enabled, uint8_t direction_reverse,
+                                  uint16_t pulse);
 void AppState_SetMotorTelemetry(uint8_t index, int32_t count, float target_rpm,
                                 float measured_rpm, int16_t pwm_command);
 

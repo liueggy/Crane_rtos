@@ -38,7 +38,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define STEP_MOTOR_RUN_PULSE 500U
+#define STEP_MOTOR_RUN_PULSE 250U /* TIM1 ARR=499 时约为 50% 占空比 */
 #define STEP_MOTOR_STOP_PULSE 0U
 #define KEY_POLL_IDLE_MS 100U
 #define MOTOR_ENABLE_STATE GPIO_PIN_RESET
@@ -140,19 +140,31 @@ static void Servo_SetPulseUs(uint16_t pulse_us)
 static void StepMotor_SetEnabled(uint8_t enabled)
 {
   /* TB6600 的 ENA 为低电平有效，逻辑层使用 enabled=1 表示使能。 */
-  HAL_GPIO_WritePin(STEP_X_ENA_GPIO_Port, STEP_X_ENA_Pin, enabled ? MOTOR_ENABLE_STATE : MOTOR_DISABLE_STATE);
+  HAL_GPIO_WritePin(STEP_Z_ENA_GPIO_Port, STEP_Z_ENA_Pin, enabled ? MOTOR_ENABLE_STATE : MOTOR_DISABLE_STATE);
 }
 
 static void StepMotor_ApplyRunState(void)
 {
   /* 同时控制驱动器使能和脉冲占空比，停止时不继续发步进脉冲。 */
   StepMotor_SetEnabled(g_motor_run);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, g_motor_run ? STEP_MOTOR_RUN_PULSE : STEP_MOTOR_STOP_PULSE);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, g_motor_run ? STEP_MOTOR_RUN_PULSE : STEP_MOTOR_STOP_PULSE);
+  AppState_SetStepperTelemetry(g_motor_run,
+                               HAL_GPIO_ReadPin(STEP_Z_DIR_GPIO_Port, STEP_Z_DIR_Pin) == GPIO_PIN_SET,
+                               g_motor_run ? STEP_MOTOR_RUN_PULSE : STEP_MOTOR_STOP_PULSE);
 }
 
 static void Led_ApplyRunState(void)
 {
-  HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, g_motor_run ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  if (g_motor_run)
+  {
+    HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);  /* 绿灯亮 */
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);          /* 红灯灭 */
+  }
+  else
+  {
+    HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_SET);    /* 绿灯灭 */
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);        /* 红灯亮 */
+  }
 }
 
 static void Motor_ToggleRunState(void)
@@ -186,7 +198,14 @@ static uint8_t Key1_IsPressed(void)
 
 static void Motor_ToggleDirection(void)
 {
-  HAL_GPIO_TogglePin(STEP_X_DIR_GPIO_Port, STEP_X_DIR_Pin);
+  /* TB6600 要求 DIR 在脉冲间保持稳定，换向前先暂停当前脉冲。 */
+  if (g_motor_run)
+  {
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, STEP_MOTOR_STOP_PULSE);
+    osDelay(2U);
+  }
+  HAL_GPIO_TogglePin(STEP_Z_DIR_GPIO_Port, STEP_Z_DIR_Pin);
+  StepMotor_ApplyRunState();
 }
 
 /* USER CODE END 0 */
@@ -441,7 +460,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 71;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 999;
+  htim1.Init.Period = 499;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
@@ -692,10 +711,16 @@ static void MX_GPIO_Init(void)
                           |DC_M3_IN1_Pin|DC_M3_IN2_Pin|DC_M4_IN2_Pin|DC_M4_IN1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, STEP_X_ENA_Pin|STEP_Z_ENA_Pin|STEP_X_DIR_Pin|STEP_Z_DIR_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, STEP_X_ENA_Pin|STEP_Z_ENA_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED_RED_Pin|BEEP_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, STEP_X_DIR_Pin|STEP_Z_DIR_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : LIMIT_Z_MAX_Pin KEY_DIR_TOGGLE_Pin KEY_RUN_STOP_Pin ESTOP_IN_Pin
                            LIMIT_X_MIN_Pin LIMIT_X_MAX_Pin */
@@ -747,12 +772,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_RED_Pin BEEP_Pin */
-  GPIO_InitStruct.Pin = LED_RED_Pin|BEEP_Pin;
+  /*Configure GPIO pin : LED_RED_Pin */
+  GPIO_InitStruct.Pin = LED_RED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(LED_RED_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BEEP_Pin */
+  GPIO_InitStruct.Pin = BEEP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BEEP_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
@@ -816,14 +848,13 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 /* USER CODE END Header_StartAppCtrlTask */
 void StartAppCtrlTask(void *argument)
 {
-  /* USER CODE BEGIN StartAppCtrlTask */
-  for (;;)
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
   {
-    /* 应用主控任务负责同步整机状态；自动状态机将在此接入。 */
-    Led_ApplyRunState();
-    osDelay(50);
+    osDelay(1);
   }
-  /* USER CODE END StartAppCtrlTask */
+  /* USER CODE END 5 */
 }
 
 /* USER CODE BEGIN Header_StartDcMotorTask */

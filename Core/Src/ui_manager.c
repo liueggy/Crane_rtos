@@ -4,12 +4,19 @@
 #include "app_state.h"
 #include "font.h"
 #include "oled.h"
+#include "cmsis_os2.h"
 #include <stdio.h>
 
 #define OLED_I2C_ADDRESS 0x78U
 
 /* 当前页面只保存页面编号，具体内容由 Render 根据状态快照绘制。 */
 static UiPage g_page = UI_PAGE_OVERVIEW;
+
+static void UiDelay(uint32_t delay_ms)
+{
+  if (osKernelGetState() == osKernelRunning) osDelay(delay_ms);
+  else HAL_Delay(delay_ms);
+}
 
 static int RoundedInt(float value)
 {
@@ -18,21 +25,52 @@ static int RoundedInt(float value)
 
 static void DrawLine(uint8_t y, const char *text)
 {
+  /* 中文界面使用 16x16 字库；ASCII 字符由字库的回退字体绘制。 */
+  OLED_PrintString(0, y, (char *)text, &font16x16, OLED_COLOR_NORMAL);
+}
+
+static void DrawAsciiLine(uint8_t y, const char *text)
+{
   OLED_PrintASCIIString(0, y, text, &afont12x6, OLED_COLOR_NORMAL);
 }
 
 static void DrawHeader(const char *title)
 {
+  char page[8];
+  OLED_PrintString(0, 0, (char *)title, &font16x16, OLED_COLOR_NORMAL);
+  (void)snprintf(page, sizeof(page), "%u/%u", (unsigned)(g_page + 1U),
+                 (unsigned)UI_PAGE_COUNT);
+  OLED_PrintASCIIString(96, 0, page, &afont12x6, OLED_COLOR_NORMAL);
+}
+
+static void DrawBootFrame(uint8_t progress)
+{
   char line[22];
-  /* 统一显示标题和页码，方便后续增加页面。 */
-  (void)snprintf(line, sizeof(line), "%s %u/%u", title,
-                 (unsigned)(g_page + 1U), (unsigned)UI_PAGE_COUNT);
-  OLED_PrintASCIIString(0, 0, line, &afont16x8, OLED_COLOR_NORMAL);
+  OLED_NewFrame();
+  OLED_PrintString(24, 8, "起重机", &font16x16, OLED_COLOR_NORMAL);
+  OLED_PrintString(28, 30, "系统启动", &font16x16, OLED_COLOR_NORMAL);
+  OLED_DrawRectangle(14, 48, 100, 8, OLED_COLOR_NORMAL);
+  OLED_DrawFilledRectangle(16, 50, (uint8_t)(progress * 96U / 100U), 4, OLED_COLOR_NORMAL);
+  (void)snprintf(line, sizeof(line), "%3u%%", (unsigned)progress);
+  OLED_PrintASCIIString(52, 58, line, &afont12x6, OLED_COLOR_NORMAL);
+  OLED_ShowFrame();
+}
+
+static void PlayBootAnimation(void)
+{
+  static const uint8_t progress[] = {0U, 25U, 50U, 75U, 100U};
+  const uint8_t progress_count = (uint8_t)(sizeof(progress) / sizeof(progress[0]));
+  for (uint8_t i = 0U; i < progress_count; ++i)
+  {
+    DrawBootFrame(progress[i]);
+    UiDelay(90U);
+  }
 }
 
 void UiManager_Init(I2C_HandleTypeDef *i2c)
 {
   OLED_Init(i2c, OLED_I2C_ADDRESS);
+  PlayBootAnimation();
   UiManager_SetPage(UI_PAGE_OVERVIEW);
 }
 
@@ -65,61 +103,67 @@ void UiManager_Render(void)
 
   switch (g_page)
   {
+    case UI_PAGE_STEPPER:
+      DrawHeader("步进");
+      DrawLine(16, state.stepper_enabled ? "状态:运行" : "状态:停止");
+      DrawLine(32, state.stepper_direction_reverse ? "方向:反转" : "方向:正转");
+      (void)snprintf(line, sizeof(line), "脉冲:%u", (unsigned)state.stepper_pulse);
+      DrawLine(48, line);
+      break;
+
     case UI_PAGE_MOTOR_SPEED:
-      DrawHeader("SPEED");
+      DrawHeader("电机速度");
       for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
       {
         (void)snprintf(line, sizeof(line), "M%u %4d/%4d P%3d", (unsigned)(i + 1U),
                        RoundedInt(state.measured_rpm[i]), RoundedInt(state.target_rpm[i]),
                        (int)state.pwm_command[i]);
-        DrawLine((uint8_t)(18U + i * 11U), line);
+        DrawAsciiLine((uint8_t)(18U + i * 11U), line);
       }
       break;
 
     case UI_PAGE_MOTOR_TUNING:
-      DrawHeader("TUNE");
+      DrawHeader("参数调节");
       (void)snprintf(line, sizeof(line), "Kp:%d.%02d Ki:%d.%02d",
                      (int)config.speed_kp[0], ((int)(config.speed_kp[0] * 100.0f)) % 100,
                      (int)config.speed_ki[0], ((int)(config.speed_ki[0] * 100.0f)) % 100);
-      DrawLine(18, line);
+      DrawAsciiLine(18, line);
       (void)snprintf(line, sizeof(line), "FF:%d.%02d SY:%d.%02d",
                      (int)config.speed_feedforward[0], ((int)(config.speed_feedforward[0] * 100.0f)) % 100,
                      (int)config.speed_sync_kp, ((int)(config.speed_sync_kp * 100.0f)) % 100);
-      DrawLine(30, line);
+      DrawAsciiLine(30, line);
       (void)snprintf(line, sizeof(line), "ACC:%d DEC:%d", RoundedInt(config.acceleration_rpm_s),
                      RoundedInt(config.deceleration_rpm_s));
-      DrawLine(42, line);
+      DrawAsciiLine(42, line);
       (void)snprintf(line, sizeof(line), "CPR:%d DT:%ums", RoundedInt(config.encoder_counts_per_output_rev),
                      (unsigned)config.motor_control_period_ms);
-      DrawLine(54, line);
+      DrawAsciiLine(54, line);
       break;
 
     case UI_PAGE_ENCODER:
-      DrawHeader("ENCODER");
+      DrawHeader("编码器");
       for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
       {
         (void)snprintf(line, sizeof(line), "M%u CNT:%ld", (unsigned)(i + 1U),
                        (long)state.encoder_count[i]);
-        DrawLine((uint8_t)(18U + i * 11U), line);
+        DrawAsciiLine((uint8_t)(18U + i * 11U), line);
       }
       break;
 
     case UI_PAGE_SYSTEM:
-      DrawHeader("SYSTEM");
-      DrawLine(18, state.estop_active ? "ESTOP: ACTIVE" : "ESTOP: OK");
-      DrawLine(30, state.k230_online ? "K230: ONLINE" : "K230: OFFLINE");
+      DrawHeader("系统");
+      DrawLine(16, state.estop_active ? "急停:触发" : "急停:正常");
+      DrawLine(32, state.k230_online ? "K230:在线" : "K230:离线");
       (void)snprintf(line, sizeof(line), "FAULT:%08lX", (unsigned long)state.fault_flags);
-      DrawLine(42, line);
-      DrawLine(54, "Hold K1: Next");
+      DrawAsciiLine(48, line);
       break;
 
     case UI_PAGE_OVERVIEW:
     default:
-      DrawHeader("CRANE");
-      DrawLine(18, state.run_enabled ? "State: RUN" : "State: STOP");
-      DrawLine(30, state.mode == APP_MODE_AUTO ? "Mode: AUTO" : "Mode: MANUAL");
-      DrawLine(42, state.estop_active ? "Safety: ESTOP" : "Safety: READY");
-      DrawLine(54, "K0 Run K1 Dir");
+      DrawHeader("总览");
+      DrawLine(16, state.run_enabled ? "运行:启动" : "运行:停止");
+      DrawLine(32, state.mode == APP_MODE_AUTO ? "模式:自动" : "模式:手动");
+      DrawLine(48, state.estop_active ? "安全:急停" : "安全:正常");
       break;
   }
   OLED_ShowFrame();
