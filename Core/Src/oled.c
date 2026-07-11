@@ -738,7 +738,7 @@ void OLED_PrintASCIIChar(uint8_t x, uint8_t y, char ch, const ASCIIFont *font, O
  * @param font 字体
  * @param color 颜色
  */
-void OLED_PrintASCIIString(uint8_t x, uint8_t y, char *str, const ASCIIFont *font, OLED_ColorMode color)
+void OLED_PrintASCIIString(uint8_t x, uint8_t y, const char *str, const ASCIIFont *font, OLED_ColorMode color)
 {
   uint8_t x0 = x;
   while (*str)

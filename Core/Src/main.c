@@ -22,7 +22,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "oled.h"
+#include "app_config.h"
+#include "app_state.h"
+#include "dc_motor.h"
+#include "encoder.h"
+#include "motor_control.h"
+#include "ui_manager.h"
 
 /* USER CODE END Includes */
 
@@ -33,15 +38,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define OLED_I2C_ADDRESS 0x78u   //定义i2c设备地址
-#define SERVO_LOW_PULSE_US 1000U
-#define SERVO_HIGH_PULSE_US 2000U
 #define STEP_MOTOR_RUN_PULSE 500U
 #define STEP_MOTOR_STOP_PULSE 0U
-#define KEY_DEBOUNCE_MS 20U
 #define KEY_POLL_IDLE_MS 100U
 #define MOTOR_ENABLE_STATE GPIO_PIN_RESET
 #define MOTOR_DISABLE_STATE GPIO_PIN_SET
+#define INPUT_FLAG_KEY0 (1UL << 0)
+#define INPUT_FLAG_KEY1 (1UL << 1)
+#define INPUT_FLAG_ESTOP (1UL << 2)
 
 /* USER CODE END PD */
 
@@ -103,8 +107,7 @@ const osThreadAttr_t OLED_attributes = {
 };
 /* USER CODE BEGIN PV */
 volatile uint8_t g_motor_run = 0;  // 0=停止, 1=运行
-static volatile uint8_t g_key0_irq_pending = 0;
-static volatile uint8_t g_key1_irq_pending = 0;
+static osEventFlagsId_t g_input_events;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -136,11 +139,13 @@ static void Servo_SetPulseUs(uint16_t pulse_us)
 
 static void StepMotor_SetEnabled(uint8_t enabled)
 {
+  /* TB6600 的 ENA 为低电平有效，逻辑层使用 enabled=1 表示使能。 */
   HAL_GPIO_WritePin(STEP_X_ENA_GPIO_Port, STEP_X_ENA_Pin, enabled ? MOTOR_ENABLE_STATE : MOTOR_DISABLE_STATE);
 }
 
 static void StepMotor_ApplyRunState(void)
 {
+  /* 同时控制驱动器使能和脉冲占空比，停止时不继续发步进脉冲。 */
   StepMotor_SetEnabled(g_motor_run);
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, g_motor_run ? STEP_MOTOR_RUN_PULSE : STEP_MOTOR_STOP_PULSE);
 }
@@ -152,7 +157,14 @@ static void Led_ApplyRunState(void)
 
 static void Motor_ToggleRunState(void)
 {
+  AppState state;
+  AppState_GetSnapshot(&state);
+  if (state.estop_active)
+  {
+    return;
+  }
   g_motor_run = !g_motor_run;
+  AppState_SetRunEnabled(g_motor_run);
   StepMotor_ApplyRunState();
   Led_ApplyRunState();
 }
@@ -175,11 +187,6 @@ static uint8_t Key1_IsPressed(void)
 static void Motor_ToggleDirection(void)
 {
   HAL_GPIO_TogglePin(STEP_X_DIR_GPIO_Port, STEP_X_DIR_Pin);
-}
-
-static uint8_t Motor_IsReverseDirection(void)
-{
-  return HAL_GPIO_ReadPin(STEP_X_DIR_GPIO_Port, STEP_X_DIR_Pin) == GPIO_PIN_SET;
 }
 
 /* USER CODE END 0 */
@@ -219,6 +226,12 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  AppConfig_Init();
+  AppState_Init();
+  Encoder_Init();
+
+  AppConfig config;
+  AppConfig_GetSnapshot(&config);
   if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
@@ -227,8 +240,8 @@ int main(void)
   {
     Error_Handler();
   }
-  Servo_SetPulseUs(SERVO_LOW_PULSE_US);
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_LOW_PULSE_US);
+  Servo_SetPulseUs(config.servo_min_us[0]);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, config.servo_min_us[1]);
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -261,6 +274,8 @@ int main(void)
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
+  DcMotor_Init(&htim3);
+  MotorControl_Init();
 
   /* USER CODE END 2 */
 
@@ -307,7 +322,11 @@ int main(void)
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
+  g_input_events = osEventFlagsNew(NULL);
+  if (g_input_events == NULL)
+  {
+    Error_Handler();
+  }
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
@@ -766,13 +785,23 @@ static void MX_GPIO_Init(void)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+  /* 中断只记录事件，消抖和业务处理放到 INPUT_EVT 任务中完成。 */
   if (GPIO_Pin == KEY_RUN_STOP_Pin)
   {
-    g_key0_irq_pending = 1U;
+    if (g_input_events != NULL) (void)osEventFlagsSet(g_input_events, INPUT_FLAG_KEY0);
   }
   else if (GPIO_Pin == KEY_DIR_TOGGLE_Pin)
   {
-    g_key1_irq_pending = 1U;
+    if (g_input_events != NULL) (void)osEventFlagsSet(g_input_events, INPUT_FLAG_KEY1);
+  }
+  else if (GPIO_Pin == ESTOP_IN_Pin)
+  {
+    if (g_input_events != NULL) (void)osEventFlagsSet(g_input_events, INPUT_FLAG_ESTOP);
+  }
+  else if ((GPIO_Pin == ENC_M1_A_Pin) || (GPIO_Pin == ENC_M2_A_Pin) ||
+           (GPIO_Pin == ENC_M3_A_Pin) || (GPIO_Pin == ENC_M4_A_Pin))
+  {
+    Encoder_HandleExti(GPIO_Pin);
   }
 }
 
@@ -790,6 +819,7 @@ void StartAppCtrlTask(void *argument)
   /* USER CODE BEGIN StartAppCtrlTask */
   for (;;)
   {
+    /* 应用主控任务负责同步整机状态；自动状态机将在此接入。 */
     Led_ApplyRunState();
     osDelay(50);
   }
@@ -806,9 +836,13 @@ void StartAppCtrlTask(void *argument)
 void StartDcMotorTask(void *argument)
 {
   /* USER CODE BEGIN StartDcMotorTask */
+  AppConfig config;
   for (;;)
   {
-    osDelay(20);
+    /* 固定周期执行四轮测速和 PI 闭环输出。 */
+    AppConfig_GetSnapshot(&config);
+    MotorControl_Update(AppState_GetRunEnabled());
+    osDelay(config.motor_control_period_ms);
   }
   /* USER CODE END StartDcMotorTask */
 }
@@ -825,6 +859,7 @@ void StartStepperTask(void *argument)
   /* USER CODE BEGIN StartStepperTask */
   for (;;)
   {
+    /* 步进轴任务统一处理 X/Z 轴脉冲、方向、使能和限位。 */
     StepMotor_ApplyRunState();
     osDelay(20);
   }
@@ -843,6 +878,7 @@ void StartK230RxTask(void *argument)
   /* USER CODE BEGIN StartK230RxTask */
   for (;;)
   {
+    /* K230 接收任务预留给视觉结果和串口调参协议解析。 */
     osDelay(20);
   }
   /* USER CODE END StartK230RxTask */
@@ -858,12 +894,22 @@ void StartK230RxTask(void *argument)
 void StartInputEvtTask(void *argument)
 {
   /* USER CODE BEGIN StartInputEvtTask */
+  AppConfig config;
   for (;;)
   {
-    if (g_key0_irq_pending)
+    /* 按键事件在此消抖；限位和急停也在此汇总到 AppState。 */
+    uint32_t flags = osEventFlagsWait(g_input_events,
+                                      INPUT_FLAG_KEY0 | INPUT_FLAG_KEY1 | INPUT_FLAG_ESTOP,
+                                      osFlagsWaitAny, osWaitForever);
+    if ((flags & osFlagsError) != 0U)
     {
-      g_key0_irq_pending = 0U;
-      osDelay(KEY_DEBOUNCE_MS);
+      continue;
+    }
+    AppConfig_GetSnapshot(&config);
+
+    if ((flags & INPUT_FLAG_KEY0) != 0U)
+    {
+      osDelay(config.key_debounce_ms);
 
       if (Key0_IsPressed())
       {
@@ -875,22 +921,31 @@ void StartInputEvtTask(void *argument)
       }
     }
 
-    if (g_key1_irq_pending)
+    if ((flags & INPUT_FLAG_KEY1) != 0U)
     {
-      g_key1_irq_pending = 0U;
-      osDelay(KEY_DEBOUNCE_MS);
+      uint32_t pressed_ms = 0U;
+      osDelay(config.key_debounce_ms);
 
       if (Key1_IsPressed())
       {
-        Motor_ToggleDirection();
         while (Key1_IsPressed())
         {
           osDelay(10);
+          pressed_ms += 10U;
         }
+        if (pressed_ms >= config.key_long_press_ms) UiManager_NextPage();
+        else Motor_ToggleDirection();
       }
     }
 
-    osDelay(KEY_POLL_IDLE_MS);
+    if ((flags & INPUT_FLAG_ESTOP) != 0U)
+    {
+      g_motor_run = 0U;
+      AppState_SetEstopActive(1U);
+      MotorControl_Reset();
+      StepMotor_ApplyRunState();
+      Led_ApplyRunState();
+    }
   }
   /* USER CODE END StartInputEvtTask */
 }
@@ -905,32 +960,17 @@ void StartInputEvtTask(void *argument)
 void StartOledTask(void *argument)
 {
   /* USER CODE BEGIN StartOledTask */
-  uint8_t high_angle = 0U;
+  AppConfig config;
 
   osDelay(20);
-  OLED_Init(&hi2c1, OLED_I2C_ADDRESS);
-  OLED_NewFrame();
-  OLED_PrintASCIIString(0, 0, "Crane RTOS", &afont16x8, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 18, "K0 Run/Stop", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 30, "K1 Direction", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 42, "Motor: STOP", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_PrintASCIIString(0, 54, "Dir: FWD", &afont12x6, OLED_COLOR_NORMAL);
-  OLED_ShowFrame();
+  UiManager_Init(&hi2c1);
 
   for (;;)
   {
-    Servo_SetPulseUs(high_angle ? SERVO_HIGH_PULSE_US : SERVO_LOW_PULSE_US);
-
-    OLED_NewFrame();
-    OLED_PrintASCIIString(0, 0, "Crane RTOS", &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 18, high_angle ? "Servo: HIGH" : "Servo: LOW ", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 30, g_motor_run ? "Motor: RUN " : "Motor: STOP", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 42, Motor_IsReverseDirection() ? "Dir: REV" : "Dir: FWD", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 54, "K0:Run K1:Dir", &afont12x6, OLED_COLOR_NORMAL);
-    OLED_ShowFrame();
-
-    high_angle ^= 1U;
-    osDelay(2000);
+    /* 显示任务只负责刷新 UI，不直接驱动舵机或电机。 */
+    AppConfig_GetSnapshot(&config);
+    UiManager_Render();
+    osDelay(config.ui_refresh_period_ms);
   }
   /* USER CODE END StartOledTask */
 }

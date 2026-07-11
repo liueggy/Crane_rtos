@@ -46,6 +46,12 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/oled.c
     Core/Src/font.c
+    Core/Src/app_config.c
+    Core/Src/app_state.c
+    Core/Src/dc_motor.c
+    Core/Src/encoder.c
+    Core/Src/motor_control.c
+    Core/Src/ui_manager.c
 )
 
 # Add include paths
