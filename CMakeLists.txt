@@ -52,6 +52,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/encoder.c
     Core/Src/motor_control.c
     Core/Src/ui_manager.c
+    Core/Src/servo_control.c
+    Core/Src/stepper_axis.c
+    Core/Src/chassis_motion.c
+    Core/Src/safety_manager.c
+    Core/Src/input_manager.c
+    Core/Src/k230_link.c
+    Core/Src/robot_routes.c
+    Core/Src/robot_controller.c
 )
 
 # Add include paths

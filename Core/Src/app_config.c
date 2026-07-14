@@ -16,6 +16,9 @@ static const AppConfig k_default_config = {
   .maximum_rpm = 130.0f,
   .pwm_max = 99U,
   .pwm_deadband = 8U,
+  .motor_test_pwm_step = 10U,
+  /* TIM3 ARR=99，CCR=99作为本工程的最高输出档。 */
+  .motor_test_pwm_limit = 99U,
   .motor_control_period_ms = 10U,
   .ui_refresh_period_ms = 100U,
   .key_debounce_ms = 20U,
@@ -36,6 +39,8 @@ static uint8_t AppConfig_IsValid(const AppConfig *config)
       (config->encoder_counts_per_output_rev < 1.0f) ||
       (config->maximum_rpm <= 0.0f) ||
       (config->pwm_max == 0U) || (config->pwm_max > 99U) ||
+      (config->motor_test_pwm_step == 0U) ||
+      (config->motor_test_pwm_limit > config->pwm_max) ||
       (config->motor_control_period_ms < 5U) ||
       (config->speed_filter_alpha < 0.0f) ||
       (config->speed_filter_alpha > 1.0f))

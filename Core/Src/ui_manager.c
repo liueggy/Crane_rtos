@@ -112,32 +112,41 @@ void UiManager_Render(void)
       break;
 
     case UI_PAGE_MOTOR_SPEED:
-      DrawHeader("电机速度");
-      for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
-      {
-        (void)snprintf(line, sizeof(line), "M%u %4d/%4d P%3d", (unsigned)(i + 1U),
-                       RoundedInt(state.measured_rpm[i]), RoundedInt(state.target_rpm[i]),
-                       (int)state.pwm_command[i]);
-        DrawAsciiLine((uint8_t)(18U + i * 11U), line);
-      }
+      DrawHeader("减速电机");
+      (void)snprintf(line, sizeof(line), "M1 G:%u/%u %s",
+                     (unsigned)state.dc_test_gear,
+                     (unsigned)((config.motor_test_pwm_limit + config.motor_test_pwm_step - 1U) /
+                                config.motor_test_pwm_step),
+                     state.dc_test_direction_reverse ? "REV" : "FWD");
+      DrawAsciiLine(18, line);
+      (void)snprintf(line, sizeof(line), "PWM:%+d T:%u%%",
+                     (int)state.pwm_command[0], (unsigned)state.dc_test_pwm_target);
+      DrawAsciiLine(30, line);
+      (void)snprintf(line, sizeof(line), "RPM:%+d", RoundedInt(state.measured_rpm[0]));
+      DrawAsciiLine(42, line);
+      (void)snprintf(line, sizeof(line), "CNT:%ld", (long)state.encoder_count[0]);
+      DrawAsciiLine(54, line);
       break;
 
     case UI_PAGE_MOTOR_TUNING:
-      DrawHeader("参数调节");
+      DrawHeader("闭环控制");
+      (void)snprintf(line, sizeof(line), "T:%+d R:%+d",
+                     RoundedInt(state.target_rpm[0]), RoundedInt(state.measured_rpm[0]));
+      DrawAsciiLine(18, line);
+      (void)snprintf(line, sizeof(line), "PWM:%+d CNT:%ld",
+                     (int)state.pwm_command[0], (long)state.encoder_count[0]);
+      DrawAsciiLine(30, line);
       (void)snprintf(line, sizeof(line), "Kp:%d.%02d Ki:%d.%02d",
                      (int)config.speed_kp[0], ((int)(config.speed_kp[0] * 100.0f)) % 100,
                      (int)config.speed_ki[0], ((int)(config.speed_ki[0] * 100.0f)) % 100);
-      DrawAsciiLine(18, line);
+      DrawAsciiLine(42, line);
       (void)snprintf(line, sizeof(line), "FF:%d.%02d SY:%d.%02d",
                      (int)config.speed_feedforward[0], ((int)(config.speed_feedforward[0] * 100.0f)) % 100,
                      (int)config.speed_sync_kp, ((int)(config.speed_sync_kp * 100.0f)) % 100);
-      DrawAsciiLine(30, line);
-      (void)snprintf(line, sizeof(line), "ACC:%d DEC:%d", RoundedInt(config.acceleration_rpm_s),
-                     RoundedInt(config.deceleration_rpm_s));
-      DrawAsciiLine(42, line);
-      (void)snprintf(line, sizeof(line), "CPR:%d DT:%ums", RoundedInt(config.encoder_counts_per_output_rev),
-                     (unsigned)config.motor_control_period_ms);
       DrawAsciiLine(54, line);
+      /* CPR和控制周期继续保留在配置代码中，避免挤占实时观测区域。 */
+      (void)config.encoder_counts_per_output_rev;
+      (void)config.motor_control_period_ms;
       break;
 
     case UI_PAGE_ENCODER:

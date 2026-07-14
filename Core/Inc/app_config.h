@@ -19,6 +19,8 @@ typedef struct
   float maximum_rpm;
   uint16_t pwm_max;
   uint16_t pwm_deadband;
+  uint16_t motor_test_pwm_step;
+  uint16_t motor_test_pwm_limit;
   uint16_t motor_control_period_ms;
   uint16_t ui_refresh_period_ms;
   uint16_t key_debounce_ms;

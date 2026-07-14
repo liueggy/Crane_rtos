@@ -61,6 +61,30 @@ void AppState_SetEstopActive(uint8_t active)
   __set_PRIMASK(primask);
 }
 
+void AppState_SetMode(AppMode mode)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_state.mode = mode;
+  __set_PRIMASK(primask);
+}
+
+void AppState_SetK230Online(uint8_t online)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_state.k230_online = online ? 1U : 0U;
+  __set_PRIMASK(primask);
+}
+
+void AppState_SetFaultFlags(uint32_t flags)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_state.fault_flags = flags;
+  __set_PRIMASK(primask);
+}
+
 void AppState_SetUiPage(uint8_t page)
 {
   uint32_t primask = __get_PRIMASK();
@@ -77,6 +101,17 @@ void AppState_SetStepperTelemetry(uint8_t enabled, uint8_t direction_reverse,
   g_state.stepper_enabled = enabled ? 1U : 0U;
   g_state.stepper_direction_reverse = direction_reverse ? 1U : 0U;
   g_state.stepper_pulse = pulse;
+  __set_PRIMASK(primask);
+}
+
+void AppState_SetDcTestState(uint8_t gear, uint8_t direction_reverse,
+                             uint16_t pwm_target)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_state.dc_test_gear = gear;
+  g_state.dc_test_direction_reverse = direction_reverse ? 1U : 0U;
+  g_state.dc_test_pwm_target = pwm_target;
   __set_PRIMASK(primask);
 }
 

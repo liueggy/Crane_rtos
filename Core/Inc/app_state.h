@@ -23,6 +23,9 @@ typedef struct
   uint8_t stepper_enabled;
   uint8_t stepper_direction_reverse;
   uint16_t stepper_pulse;
+  uint8_t dc_test_gear;
+  uint8_t dc_test_direction_reverse;
+  uint16_t dc_test_pwm_target;
   int32_t encoder_count[APP_MOTOR_COUNT];
   float target_rpm[APP_MOTOR_COUNT];
   float measured_rpm[APP_MOTOR_COUNT];
@@ -36,9 +39,14 @@ void AppState_GetSnapshot(AppState *snapshot);
 void AppState_SetRunEnabled(uint8_t enabled);
 uint8_t AppState_GetRunEnabled(void);
 void AppState_SetEstopActive(uint8_t active);
+void AppState_SetMode(AppMode mode);
+void AppState_SetK230Online(uint8_t online);
+void AppState_SetFaultFlags(uint32_t flags);
 void AppState_SetUiPage(uint8_t page);
 void AppState_SetStepperTelemetry(uint8_t enabled, uint8_t direction_reverse,
                                   uint16_t pulse);
+void AppState_SetDcTestState(uint8_t gear, uint8_t direction_reverse,
+                             uint16_t pwm_target);
 void AppState_SetMotorTelemetry(uint8_t index, int32_t count, float target_rpm,
                                 float measured_rpm, int16_t pwm_command);
 

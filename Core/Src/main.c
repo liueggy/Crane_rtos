@@ -24,9 +24,16 @@
 /* USER CODE BEGIN Includes */
 #include "app_config.h"
 #include "app_state.h"
+#include "chassis_motion.h"
 #include "dc_motor.h"
 #include "encoder.h"
+#include "input_manager.h"
+#include "k230_link.h"
 #include "motor_control.h"
+#include "robot_controller.h"
+#include "safety_manager.h"
+#include "servo_control.h"
+#include "stepper_axis.h"
 #include "ui_manager.h"
 
 /* USER CODE END Includes */
@@ -38,15 +45,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define STEP_MOTOR_RUN_PULSE 250U /* TIM1 ARR=499 时约为 50% 占空比 */
-#define STEP_MOTOR_STOP_PULSE 0U
-#define KEY_POLL_IDLE_MS 100U
-#define MOTOR_ENABLE_STATE GPIO_PIN_RESET
-#define MOTOR_DISABLE_STATE GPIO_PIN_SET
-#define INPUT_FLAG_KEY0 (1UL << 0)
-#define INPUT_FLAG_KEY1 (1UL << 1)
-#define INPUT_FLAG_ESTOP (1UL << 2)
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,8 +58,11 @@ I2C_HandleTypeDef hi2c1;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim8;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_rx;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* Definitions for APP_CTRL */
 osThreadId_t APP_CTRLHandle;
@@ -106,18 +107,18 @@ const osThreadAttr_t OLED_attributes = {
   .priority = (osPriority_t) osPriorityLow,
 };
 /* USER CODE BEGIN PV */
-volatile uint8_t g_motor_run = 0;  // 0=停止, 1=运行
-static osEventFlagsId_t g_input_events;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_TIM8_Init(void);
 void StartAppCtrlTask(void *argument);
 void StartDcMotorTask(void *argument);
 void StartStepperTask(void *argument);
@@ -132,9 +133,268 @@ void StartOledTask(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-static void Servo_SetPulseUs(uint16_t pulse_us)
+#if 0 /* 旧版业务实现已迁移至 Core/Src 对应模块，保留一版便于本次结构迁移审阅。 */
+
+static uint16_t Servo_ClampPulse(uint8_t index, uint16_t pulse_us)
 {
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pulse_us);
+  AppConfig config;
+  AppConfig_GetSnapshot(&config);
+  if (index >= 2U)
+  {
+    return 0U;
+  }
+  if (pulse_us < config.servo_min_us[index])
+  {
+    return config.servo_min_us[index];
+  }
+  if (pulse_us > config.servo_max_us[index])
+  {
+    return config.servo_max_us[index];
+  }
+  return pulse_us;
+}
+
+static void Servo_SetPulseUsByIndex(uint8_t index, uint16_t pulse_us)
+{
+  uint32_t channel;
+  if (index >= 2U)
+  {
+    return;
+  }
+  pulse_us = Servo_ClampPulse(index, pulse_us);
+  channel = (index == 0U) ? TIM_CHANNEL_1 : TIM_CHANNEL_2;
+  __HAL_TIM_SET_COMPARE(&htim2, channel, pulse_us);
+  g_servo_pulse_us[index] = pulse_us;
+}
+
+static void Servo_SetAngle(uint8_t index, uint16_t angle)
+{
+  AppConfig config;
+  uint32_t pulse;
+  AppConfig_GetSnapshot(&config);
+  if (index >= 2U)
+  {
+    return;
+  }
+  if (angle > 270U)
+  {
+    angle = 270U;
+  }
+  pulse = config.servo_min_us[index] +
+          ((uint32_t)(config.servo_max_us[index] - config.servo_min_us[index]) * angle) / 270U;
+  Servo_SetPulseUsByIndex(index, (uint16_t)pulse);
+  g_servo_angle[index] = angle;
+}
+
+static void Uart2_StartReceive(void)
+{
+  memset(g_uart2_rx_dma, 0, sizeof(g_uart2_rx_dma));
+  if (huart2.hdmarx != NULL)
+  {
+    __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
+  }
+  (void)HAL_UARTEx_ReceiveToIdle_DMA(&huart2, g_uart2_rx_dma, sizeof(g_uart2_rx_dma));
+}
+
+static void Uart2_SendText(const char *text)
+{
+  size_t length = strlen(text);
+  if (length >= sizeof(g_uart2_tx_buffer))
+  {
+    length = sizeof(g_uart2_tx_buffer) - 1U;
+  }
+  while (g_uart2_tx_busy)
+  {
+    osDelay(1U);
+  }
+  memcpy(g_uart2_tx_buffer, text, length);
+  g_uart2_tx_buffer[length] = '\0';
+  g_uart2_tx_busy = 1U;
+  if (HAL_UART_Transmit_DMA(&huart2, g_uart2_tx_buffer, (uint16_t)length) != HAL_OK)
+  {
+    g_uart2_tx_busy = 0U;
+  }
+}
+
+static void DcMotorTest_SelectNextGear(void)
+{
+  AppConfig config;
+  AppState state;
+  char response[UART2_TX_BUFFER_SIZE];
+
+  AppConfig_GetSnapshot(&config);
+  AppState_GetSnapshot(&state);
+  if (state.estop_active)
+  {
+    Uart2_SendText("DC TEST BLOCKED: ESTOP\r\n");
+    return;
+  }
+
+  if ((g_dc_test_pwm + config.motor_test_pwm_step) > config.motor_test_pwm_limit)
+  {
+    g_dc_test_pwm = 0U;
+  }
+  else
+  {
+    g_dc_test_pwm += config.motor_test_pwm_step;
+  }
+  AppState_SetRunEnabled(g_dc_test_pwm > 0U);
+  AppState_SetDcTestState((uint8_t)((g_dc_test_pwm + config.motor_test_pwm_step - 1U) /
+                                    config.motor_test_pwm_step),
+                          g_dc_test_direction_reverse, g_dc_test_pwm);
+  (void)snprintf(response, sizeof(response),
+                 "DC M1 GEAR=%u PWM=%u DIR=%s\r\n",
+                 (unsigned)((g_dc_test_pwm + config.motor_test_pwm_step - 1U) /
+                            config.motor_test_pwm_step),
+                 (unsigned)g_dc_test_pwm,
+                 g_dc_test_direction_reverse ? "REV" : "FWD");
+  Uart2_SendText(response);
+}
+
+static void DcMotorTest_ToggleDirection(void)
+{
+  AppConfig config;
+  char response[UART2_TX_BUFFER_SIZE];
+
+  AppConfig_GetSnapshot(&config);
+  g_dc_test_direction_reverse ^= 1U;
+  AppState_SetDcTestState((uint8_t)((g_dc_test_pwm + config.motor_test_pwm_step - 1U) /
+                                    config.motor_test_pwm_step),
+                          g_dc_test_direction_reverse, g_dc_test_pwm);
+  (void)snprintf(response, sizeof(response), "DC M1 DIR=%s\r\n",
+                 g_dc_test_direction_reverse ? "REV" : "FWD");
+  Uart2_SendText(response);
+}
+
+static void DcPid_AdjustTarget(int16_t delta_rpm)
+{
+  AppConfig config;
+  char response[UART2_TX_BUFFER_SIZE];
+  int32_t target;
+
+  AppConfig_GetSnapshot(&config);
+  target = (int32_t)g_dc_target_rpm + delta_rpm;
+  if (target > (int32_t)config.maximum_rpm)
+  {
+    target = (int32_t)config.maximum_rpm;
+  }
+  else if (target < -(int32_t)config.maximum_rpm)
+  {
+    target = -(int32_t)config.maximum_rpm;
+  }
+  g_dc_target_rpm = (int16_t)target;
+  (void)snprintf(response, sizeof(response), "PID TARGET=%d RPM\r\n",
+                 (int)g_dc_target_rpm);
+  Uart2_SendText(response);
+}
+
+static uint8_t Uart2_ParseValue(const char *text, long *value)
+{
+  char *end;
+  while ((*text == ' ') || (*text == '='))
+  {
+    ++text;
+  }
+  *value = strtol(text, &end, 10);
+  return (end != text) && ((*end == '\0') || (*end == '\r') || (*end == '\n'));
+}
+
+static void Uart2_ProcessCommand(char *command)
+{
+  char response[UART2_TX_BUFFER_SIZE];
+  long value;
+  uint8_t index;
+
+  while ((*command == ' ') || (*command == '\t'))
+  {
+    ++command;
+  }
+  for (char *cursor = command; *cursor != '\0'; ++cursor)
+  {
+    if ((*cursor == '\r') || (*cursor == '\n'))
+    {
+      *cursor = '\0';
+      break;
+    }
+  }
+
+  if (strcmp(command, "PING") == 0)
+  {
+    Uart2_SendText("PONG\r\n");
+    return;
+  }
+  if (strcmp(command, "HELP") == 0)
+  {
+    Uart2_SendText("PING | GET | S1/S2 <us> | A1/A2 <deg 0..270> | ALL <us> | ALLA <deg>\r\n");
+    return;
+  }
+  if (strcmp(command, "GET") == 0)
+  {
+    (void)snprintf(response, sizeof(response), "S1=%u S2=%u\r\n",
+                   (unsigned)g_servo_pulse_us[0], (unsigned)g_servo_pulse_us[1]);
+    Uart2_SendText(response);
+    return;
+  }
+  if (strncmp(command, "ALLA", 4) == 0)
+  {
+    if (Uart2_ParseValue(command + 4, &value) && (value >= 0L) && (value <= 270L))
+    {
+      Servo_SetAngle(0U, (uint16_t)value);
+      Servo_SetAngle(1U, (uint16_t)value);
+      (void)snprintf(response, sizeof(response), "OK ALLA=%ld\r\n", value);
+    }
+    else
+    {
+      (void)snprintf(response, sizeof(response), "ERR angle 0..270\r\n");
+    }
+    Uart2_SendText(response);
+    return;
+  }
+  if (strncmp(command, "ALL", 3) == 0)
+  {
+    if (Uart2_ParseValue(command + 3, &value) && (value >= 0L) && (value <= 2500L))
+    {
+      Servo_SetPulseUsByIndex(0U, (uint16_t)value);
+      Servo_SetPulseUsByIndex(1U, (uint16_t)value);
+      (void)snprintf(response, sizeof(response), "OK ALL=%u\r\n",
+                     (unsigned)g_servo_pulse_us[0]);
+    }
+    else
+    {
+      (void)snprintf(response, sizeof(response), "ERR pulse\r\n");
+    }
+    Uart2_SendText(response);
+    return;
+  }
+  if ((command[0] == 'S') || (command[0] == 'A'))
+  {
+    if ((command[1] == '1') || (command[1] == '2'))
+    {
+      index = (uint8_t)(command[1] - '1');
+      if (Uart2_ParseValue(command + 2, &value) &&
+           ((command[0] == 'A' && value >= 0L && value <= 270L) ||
+           (command[0] == 'S' && value >= 0L && value <= 2500L)))
+      {
+        if (command[0] == 'A')
+        {
+          Servo_SetAngle(index, (uint16_t)value);
+        }
+        else
+        {
+          Servo_SetPulseUsByIndex(index, (uint16_t)value);
+        }
+        (void)snprintf(response, sizeof(response), "OK %c%u=%u\r\n", command[0],
+                       (unsigned)(index + 1U), (unsigned)g_servo_pulse_us[index]);
+      }
+      else
+      {
+        (void)snprintf(response, sizeof(response), "ERR value\r\n");
+      }
+      Uart2_SendText(response);
+      return;
+    }
+  }
+  Uart2_SendText("ERR unknown command, send HELP\r\n");
 }
 
 static void StepMotor_SetEnabled(uint8_t enabled)
@@ -208,6 +468,8 @@ static void Motor_ToggleDirection(void)
   StepMotor_ApplyRunState();
 }
 
+#endif
+
 /* USER CODE END 0 */
 
 /**
@@ -239,15 +501,22 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM2_Init();
   MX_I2C1_Init();
   MX_TIM1_Init();
   MX_USART2_UART_Init();
   MX_TIM3_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
   AppConfig_Init();
   AppState_Init();
   Encoder_Init();
+  SafetyManager_Init();
+  ServoControl_Init(&htim2);
+  StepperAxis_Init(&htim1);
+  ChassisMotion_Init();
+  RobotController_Init();
 
   AppConfig config;
   AppConfig_GetSnapshot(&config);
@@ -259,8 +528,8 @@ int main(void)
   {
     Error_Handler();
   }
-  Servo_SetPulseUs(config.servo_min_us[0]);
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, config.servo_min_us[1]);
+  ServoControl_SetAngle(0U, 90U);
+  ServoControl_SetPulseUs(1U, config.servo_min_us[1]);
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -270,8 +539,7 @@ int main(void)
   {
     Error_Handler();
   }
-  StepMotor_ApplyRunState();
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, STEP_MOTOR_STOP_PULSE);
+  StepperAxis_StopAll();
 
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -289,11 +557,31 @@ int main(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
-  DcMotor_Init(&htim3);
+  __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0U);
+  __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_2, 0U);
+  __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_3, 0U);
+  __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_4, 0U);
+  DcMotor_Init(&htim3, &htim8);
   MotorControl_Init();
 
   /* USER CODE END 2 */
@@ -341,11 +629,8 @@ int main(void)
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
-  g_input_events = osEventFlagsNew(NULL);
-  if (g_input_events == NULL)
-  {
-    Error_Handler();
-  }
+  InputManager_Init();
+  K230Link_Init(&huart2);
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
@@ -652,6 +937,83 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 71;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 99;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim8, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
+  HAL_TIM_MspPostInit(&htim8);
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -685,6 +1047,25 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+  /* DMA1_Channel7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -707,8 +1088,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, DC_M1_IN1_Pin|DC_M1_IN2_Pin|DC_M2_IN1_Pin|DC_M2_IN2_Pin
-                          |DC_M3_IN1_Pin|DC_M3_IN2_Pin|DC_M4_IN2_Pin|DC_M4_IN1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, DC_M1_UNUSED_1_Pin|DC_M1_UNUSED_2_Pin|DC_M2_UNUSED_1_Pin|DC_M2_UNUSED_2_Pin
+                          |DC_M3_UNUSED_1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, STEP_X_ENA_Pin|STEP_Z_ENA_Pin, GPIO_PIN_SET);
@@ -722,10 +1103,14 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : LIMIT_Z_MAX_Pin KEY_DIR_TOGGLE_Pin KEY_RUN_STOP_Pin ESTOP_IN_Pin
-                           LIMIT_X_MIN_Pin LIMIT_X_MAX_Pin */
-  GPIO_InitStruct.Pin = LIMIT_Z_MAX_Pin|KEY_DIR_TOGGLE_Pin|KEY_RUN_STOP_Pin|ESTOP_IN_Pin
-                          |LIMIT_X_MIN_Pin|LIMIT_X_MAX_Pin;
+  /*Configure GPIO pins : LIMIT_Z_MAX_Pin LIMIT_X_MIN_Pin LIMIT_X_MAX_Pin */
+  GPIO_InitStruct.Pin = LIMIT_Z_MAX_Pin|LIMIT_X_MIN_Pin|LIMIT_X_MAX_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : KEY_DIR_TOGGLE_Pin KEY_RUN_STOP_Pin ESTOP_IN_Pin */
+  GPIO_InitStruct.Pin = KEY_DIR_TOGGLE_Pin|KEY_RUN_STOP_Pin|ESTOP_IN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
@@ -737,14 +1122,20 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_STATUS_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : DC_M1_IN1_Pin DC_M1_IN2_Pin DC_M2_IN1_Pin DC_M2_IN2_Pin
-                           DC_M3_IN1_Pin DC_M3_IN2_Pin DC_M4_IN2_Pin DC_M4_IN1_Pin */
-  GPIO_InitStruct.Pin = DC_M1_IN1_Pin|DC_M1_IN2_Pin|DC_M2_IN1_Pin|DC_M2_IN2_Pin
-                          |DC_M3_IN1_Pin|DC_M3_IN2_Pin|DC_M4_IN2_Pin|DC_M4_IN1_Pin;
+  /*Configure GPIO pins : DC_M1_UNUSED_1_Pin DC_M1_UNUSED_2_Pin DC_M2_UNUSED_1_Pin DC_M2_UNUSED_2_Pin
+                           DC_M3_UNUSED_1_Pin */
+  GPIO_InitStruct.Pin = DC_M1_UNUSED_1_Pin|DC_M1_UNUSED_2_Pin|DC_M2_UNUSED_1_Pin|DC_M2_UNUSED_2_Pin
+                          |DC_M3_UNUSED_1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LIMIT_Z_MIN_Pin */
+  GPIO_InitStruct.Pin = LIMIT_Z_MIN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(LIMIT_Z_MIN_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : ENC_M1_A_Pin ENC_M2_A_Pin ENC_M3_A_Pin ENC_M4_A_Pin */
   GPIO_InitStruct.Pin = ENC_M1_A_Pin|ENC_M2_A_Pin|ENC_M3_A_Pin|ENC_M4_A_Pin;
@@ -817,24 +1208,36 @@ static void MX_GPIO_Init(void)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  /* 中断只记录事件，消抖和业务处理放到 INPUT_EVT 任务中完成。 */
-  if (GPIO_Pin == KEY_RUN_STOP_Pin)
-  {
-    if (g_input_events != NULL) (void)osEventFlagsSet(g_input_events, INPUT_FLAG_KEY0);
-  }
-  else if (GPIO_Pin == KEY_DIR_TOGGLE_Pin)
-  {
-    if (g_input_events != NULL) (void)osEventFlagsSet(g_input_events, INPUT_FLAG_KEY1);
-  }
-  else if (GPIO_Pin == ESTOP_IN_Pin)
-  {
-    if (g_input_events != NULL) (void)osEventFlagsSet(g_input_events, INPUT_FLAG_ESTOP);
-  }
-  else if ((GPIO_Pin == ENC_M1_A_Pin) || (GPIO_Pin == ENC_M2_A_Pin) ||
-           (GPIO_Pin == ENC_M3_A_Pin) || (GPIO_Pin == ENC_M4_A_Pin))
+  if ((GPIO_Pin == ENC_M1_A_Pin) || (GPIO_Pin == ENC_M2_A_Pin) ||
+      (GPIO_Pin == ENC_M3_A_Pin) || (GPIO_Pin == ENC_M4_A_Pin))
   {
     Encoder_HandleExti(GPIO_Pin);
   }
+  else if (GPIO_Pin == ESTOP_IN_Pin)
+  {
+    SafetyManager_TriggerEstop();
+    InputManager_HandleExti(GPIO_Pin);
+  }
+  else
+  {
+    SafetyManager_HandleExti(GPIO_Pin);
+    InputManager_HandleExti(GPIO_Pin);
+  }
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+  K230Link_HandleRxEvent(huart, Size);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  K230Link_HandleTxComplete(huart);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  K230Link_HandleError(huart);
 }
 
 /* USER CODE END 4 */
@@ -849,10 +1252,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 void StartAppCtrlTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    RobotController_Update();
+    osDelay(10U);
   }
   /* USER CODE END 5 */
 }
@@ -867,12 +1270,11 @@ void StartAppCtrlTask(void *argument)
 void StartDcMotorTask(void *argument)
 {
   /* USER CODE BEGIN StartDcMotorTask */
-  AppConfig config;
   for (;;)
   {
-    /* 固定周期执行四轮测速和 PI 闭环输出。 */
+    AppConfig config;
     AppConfig_GetSnapshot(&config);
-    MotorControl_Update(AppState_GetRunEnabled());
+    ChassisMotion_TaskStep();
     osDelay(config.motor_control_period_ms);
   }
   /* USER CODE END StartDcMotorTask */
@@ -890,8 +1292,7 @@ void StartStepperTask(void *argument)
   /* USER CODE BEGIN StartStepperTask */
   for (;;)
   {
-    /* 步进轴任务统一处理 X/Z 轴脉冲、方向、使能和限位。 */
-    StepMotor_ApplyRunState();
+    StepperAxis_UpdateTelemetry();
     osDelay(20);
   }
   /* USER CODE END StartStepperTask */
@@ -907,11 +1308,7 @@ void StartStepperTask(void *argument)
 void StartK230RxTask(void *argument)
 {
   /* USER CODE BEGIN StartK230RxTask */
-  for (;;)
-  {
-    /* K230 接收任务预留给视觉结果和串口调参协议解析。 */
-    osDelay(20);
-  }
+  K230Link_Task();
   /* USER CODE END StartK230RxTask */
 }
 
@@ -925,59 +1322,7 @@ void StartK230RxTask(void *argument)
 void StartInputEvtTask(void *argument)
 {
   /* USER CODE BEGIN StartInputEvtTask */
-  AppConfig config;
-  for (;;)
-  {
-    /* 按键事件在此消抖；限位和急停也在此汇总到 AppState。 */
-    uint32_t flags = osEventFlagsWait(g_input_events,
-                                      INPUT_FLAG_KEY0 | INPUT_FLAG_KEY1 | INPUT_FLAG_ESTOP,
-                                      osFlagsWaitAny, osWaitForever);
-    if ((flags & osFlagsError) != 0U)
-    {
-      continue;
-    }
-    AppConfig_GetSnapshot(&config);
-
-    if ((flags & INPUT_FLAG_KEY0) != 0U)
-    {
-      osDelay(config.key_debounce_ms);
-
-      if (Key0_IsPressed())
-      {
-        Motor_ToggleRunState();
-        while (Key0_IsPressed())
-        {
-          osDelay(10);
-        }
-      }
-    }
-
-    if ((flags & INPUT_FLAG_KEY1) != 0U)
-    {
-      uint32_t pressed_ms = 0U;
-      osDelay(config.key_debounce_ms);
-
-      if (Key1_IsPressed())
-      {
-        while (Key1_IsPressed())
-        {
-          osDelay(10);
-          pressed_ms += 10U;
-        }
-        if (pressed_ms >= config.key_long_press_ms) UiManager_NextPage();
-        else Motor_ToggleDirection();
-      }
-    }
-
-    if ((flags & INPUT_FLAG_ESTOP) != 0U)
-    {
-      g_motor_run = 0U;
-      AppState_SetEstopActive(1U);
-      MotorControl_Reset();
-      StepMotor_ApplyRunState();
-      Led_ApplyRunState();
-    }
-  }
+  InputManager_Task();
   /* USER CODE END StartInputEvtTask */
 }
 

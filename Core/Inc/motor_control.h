@@ -8,6 +8,10 @@ void MotorControl_Init(void);
 void MotorControl_SetTargetRpm(uint8_t index, float rpm);
 void MotorControl_SetAllTargetRpm(float rpm);
 void MotorControl_Update(uint8_t enabled);
+/* 单电机开环验证：保留编码器测速，但不执行 PI 控速。 */
+void MotorControl_UpdateOpenLoopSingle(uint8_t index, int16_t pwm_command);
+/* 单电机PI控速调试，目标单位为RPM，正负号表示方向。 */
+void MotorControl_UpdatePidSingle(uint8_t index, float target_rpm);
 /* 清零积分和目标，并关闭四路电机。 */
 void MotorControl_Reset(void);
 

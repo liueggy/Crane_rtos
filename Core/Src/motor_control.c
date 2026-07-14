@@ -118,3 +118,78 @@ void MotorControl_Update(uint8_t enabled)
                                g_loops[i].measured_rpm, command);
   }
 }
+
+void MotorControl_UpdateOpenLoopSingle(uint8_t index, int16_t pwm_command)
+{
+  AppConfig config;
+  AppConfig_GetSnapshot(&config);
+
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    int32_t delta = Encoder_GetDelta(i);
+    float raw_rpm = ((float)delta * 60000.0f) /
+                    (config.encoder_counts_per_output_rev *
+                     (float)config.motor_control_period_ms);
+    int16_t output = (i == index) ? pwm_command : 0;
+
+    g_loops[i].requested_rpm = 0.0f;
+    g_loops[i].ramped_rpm = 0.0f;
+    g_loops[i].integral = 0.0f;
+    g_loops[i].measured_rpm +=
+        config.speed_filter_alpha * (raw_rpm - g_loops[i].measured_rpm);
+    if (i == index)
+    {
+      DcMotor_SetCommand(i, output);
+    }
+    else
+    {
+      /* 当前M1调试占用TIM3_CH1/CH2，不能让旧M2逻辑覆盖CH2。 */
+      output = 0;
+    }
+    AppState_SetMotorTelemetry(i, Encoder_GetCount(i), 0.0f,
+                               g_loops[i].measured_rpm, output);
+  }
+}
+
+void MotorControl_UpdatePidSingle(uint8_t index, float target_rpm)
+{
+  AppConfig config;
+  MotorLoop *loop;
+  int32_t delta;
+  float dt;
+  float raw_rpm;
+  float error;
+  float output;
+
+  if (index >= APP_MOTOR_COUNT)
+  {
+    return;
+  }
+  AppConfig_GetSnapshot(&config);
+  loop = &g_loops[index];
+  dt = (float)config.motor_control_period_ms / 1000.0f;
+  loop->requested_rpm = ClampFloat(target_rpm, -config.maximum_rpm, config.maximum_rpm);
+
+  delta = Encoder_GetDelta(index);
+  raw_rpm = ((float)delta * 60000.0f) /
+            (config.encoder_counts_per_output_rev *
+             (float)config.motor_control_period_ms);
+  loop->measured_rpm += config.speed_filter_alpha * (raw_rpm - loop->measured_rpm);
+
+  loop->ramped_rpm = MoveTowards(loop->ramped_rpm, loop->requested_rpm,
+                                 ((loop->requested_rpm == 0.0f) ?
+                                  config.deceleration_rpm_s : config.acceleration_rpm_s) * dt);
+  error = loop->ramped_rpm - loop->measured_rpm;
+  loop->integral = ClampFloat(loop->integral + error * config.speed_ki[index] * dt,
+                              -(float)config.pwm_max, (float)config.pwm_max);
+  output = loop->ramped_rpm * config.speed_feedforward[index] +
+           error * config.speed_kp[index] + loop->integral;
+  if (loop->ramped_rpm != 0.0f)
+  {
+    output += (output > 0.0f) ? (float)config.pwm_deadband : -(float)config.pwm_deadband;
+  }
+  output = ClampFloat(output, -(float)config.pwm_max, (float)config.pwm_max);
+  DcMotor_SetCommand(index, (int16_t)output);
+  AppState_SetMotorTelemetry(index, Encoder_GetCount(index), loop->ramped_rpm,
+                             loop->measured_rpm, (int16_t)output);
+}
