@@ -82,6 +82,8 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim)
   {
     g_last_capture = capture;
     g_capture_started = 1U;
+    /* 翻转捕获极性，使下一次捕获在相反的边沿触发。 */
+    g_ir_timer->Instance->CCER ^= TIM_CCER_CC4P;
     return;
   }
 
@@ -156,6 +158,10 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim)
       g_decode_state = IR_WAIT_LEADER_MARK;
       break;
   }
+
+  /* 翻转捕获极性，使下一次捕获在相反的边沿触发。
+   * TIM4（通用定时器）无硬件 BOTHEDGE 支持，需软件交替。 */
+  g_ir_timer->Instance->CCER ^= TIM_CCER_CC4P;
 }
 
 void InfraredRemote_Process(void)
@@ -176,23 +182,6 @@ void InfraredRemote_Process(void)
   __set_PRIMASK(primask);
 
   g_last_command = command;
-  switch (command)
-  {
-    case IR_REMOTE_CMD_UP:
-      HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
-      break;
-
-    case IR_REMOTE_CMD_DOWN:
-      HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-      break;
-
-    case IR_REMOTE_CMD_POWER:
-      HAL_GPIO_TogglePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin);
-      break;
-
-    default:
-      break;
-  }
 }
 
 uint8_t InfraredRemote_GetLastCommand(void)

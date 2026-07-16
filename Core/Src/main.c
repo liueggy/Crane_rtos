@@ -987,8 +987,10 @@ static void MX_TIM4_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM4_Init 2 */
-  /* NEC 帧需要同时测量红外接收头的低电平脉冲和高电平间隔。 */
-  __HAL_TIM_SET_CAPTUREPOLARITY(&htim4, TIM_CHANNEL_4, TIM_INPUTCHANNELPOLARITY_BOTHEDGE);
+  /* TIM4 是通用定时器，不支持 BOTHEDGE 硬件捕获。
+   * 初始化为下降沿捕获（9ms 引导码起始沿），
+   * 由 InfraredRemote_HandleCapture 每次捕获后翻转极性。 */
+  __HAL_TIM_SET_CAPTUREPOLARITY(&htim4, TIM_CHANNEL_4, TIM_INPUTCHANNELPOLARITY_FALLING);
 
   /* USER CODE END TIM4_Init 2 */
 
