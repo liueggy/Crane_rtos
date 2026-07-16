@@ -28,6 +28,7 @@
 #include "dc_motor.h"
 #include "encoder.h"
 #include "input_manager.h"
+#include "infrared_remote.h"
 #include "k230_link.h"
 #include "motor_control.h"
 #include "robot_controller.h"
@@ -58,6 +59,7 @@ I2C_HandleTypeDef hi2c1;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim8;
 
 UART_HandleTypeDef huart2;
@@ -119,6 +121,7 @@ static void MX_TIM1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM8_Init(void);
+static void MX_TIM4_Init(void);
 void StartAppCtrlTask(void *argument);
 void StartDcMotorTask(void *argument);
 void StartStepperTask(void *argument);
@@ -508,6 +511,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM3_Init();
   MX_TIM8_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
   AppConfig_Init();
   AppState_Init();
@@ -517,6 +521,10 @@ int main(void)
   StepperAxis_Init(&htim1);
   ChassisMotion_Init();
   RobotController_Init();
+  if (InfraredRemote_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   AppConfig config;
   AppConfig_GetSnapshot(&config);
@@ -937,6 +945,56 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 71;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 65535;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 3;
+  if (HAL_TIM_IC_ConfigChannel(&htim4, &sConfigIC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+  /* NEC 帧需要同时测量红外接收头的低电平脉冲和高电平间隔。 */
+  __HAL_TIM_SET_CAPTUREPOLARITY(&htim4, TIM_CHANNEL_4, TIM_INPUTCHANNELPOLARITY_BOTHEDGE);
+
+  /* USER CODE END TIM4_Init 2 */
+
+}
+
+/**
   * @brief TIM8 Initialization Function
   * @param None
   * @retval None
@@ -1240,6 +1298,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   K230Link_HandleError(huart);
 }
 
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  InfraredRemote_HandleCapture(htim);
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartAppCtrlTask */
@@ -1254,6 +1317,7 @@ void StartAppCtrlTask(void *argument)
   /* USER CODE BEGIN 5 */
   for(;;)
   {
+    InfraredRemote_Process();
     RobotController_Update();
     osDelay(10U);
   }
@@ -1353,7 +1417,7 @@ void StartOledTask(void *argument)
 
 /**
   * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM4 interrupt took place, inside
+  * @note   This function is called  when TIM5 interrupt took place, inside
   * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
   * a global variable "uwTick" used as application time base.
   * @param  htim : TIM handle
@@ -1364,7 +1428,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM4)
+  if (htim->Instance == TIM5)
   {
     HAL_IncTick();
   }

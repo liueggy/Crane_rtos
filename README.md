@@ -40,7 +40,7 @@ Crane_rtos/
 ├── CMakeLists.txt            应用源文件和构建入口
 ├── CMakePresets.json         Debug/Release 预设
 ├── STM32F103XX_FLASH.ld      STM32F103xE 链接脚本
-└── docs/项目配置与开发进度.md  唯一项目配置与进度文档
+└── README.md                 项目配置、开发进度与移植说明
 ```
 
 业务代码按模块拆分，`main.c` 主要保留外设初始化、HAL 回调转发和 FreeRTOS 任务入口：
@@ -208,6 +208,12 @@ TB6600 ENA 低电平有效。Z 轴当前使用 4 细分、800 脉冲/圈、TIM1 
 - X 最小/最大：PE0/PE1；Z 上/下：PE2/PC5。
 - 光电模块无遮挡 `DO=低`、遮挡 `DO=高`，四路限位使用内部下拉和上升沿 EXTI。
 - 光电模块只有在 DO 高电平不超过 3.3V 时才能直接连接 STM32；高于 3.3V 必须做电平转换。
+
+### 红外遥控
+
+- 接收端 DO：PB9 / TIM4_CH4，标签 `IR_REMOTE_RX`；应连接 3.3V 逻辑电平的解调型红外接收模块，且必须与 STM32 共地。
+- TIM4：CH4 双边沿输入捕获、`PSC=71`、`ARR=65535`，计数分辨率为 1 us；必须启用 `TIM4_IRQn`，不要将其再用作 HAL 时基。
+- 当前仅实现 NEC 协议的三个调试按键：`UP (0x46)` 点亮红灯 PB5，`DOWN (0x15)` 关闭红灯 PB5，`POWER (0x45)` 翻转状态灯 PE5。两只 LED 均为低电平点亮。
 
 ## 8. FreeRTOS 任务
 

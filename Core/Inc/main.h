@@ -150,6 +150,8 @@ void Error_Handler(void);
 #define OLED_SDA_GPIO_Port GPIOB
 #define BEEP_Pin GPIO_PIN_8
 #define BEEP_GPIO_Port GPIOB
+#define IR_REMOTE_RX_Pin GPIO_PIN_9
+#define IR_REMOTE_RX_GPIO_Port GPIOB
 #define LIMIT_X_MIN_Pin GPIO_PIN_0
 #define LIMIT_X_MIN_GPIO_Port GPIOE
 #define LIMIT_X_MIN_EXTI_IRQn EXTI0_IRQn

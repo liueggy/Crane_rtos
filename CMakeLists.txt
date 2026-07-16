@@ -57,6 +57,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/chassis_motion.c
     Core/Src/safety_manager.c
     Core/Src/input_manager.c
+    Core/Src/infrared_remote.c
     Core/Src/k230_link.c
     Core/Src/robot_routes.c
     Core/Src/robot_controller.c
