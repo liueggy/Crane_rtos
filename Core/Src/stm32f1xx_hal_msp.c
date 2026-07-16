@@ -220,7 +220,7 @@ void HAL_TIM_IC_MspInit(TIM_HandleTypeDef* htim_ic)
     */
     GPIO_InitStruct.Pin = IR_REMOTE_RX_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(IR_REMOTE_RX_GPIO_Port, &GPIO_InitStruct);
 
     /* TIM4 interrupt Init */
