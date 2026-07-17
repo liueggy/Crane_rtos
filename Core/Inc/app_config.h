@@ -27,6 +27,10 @@ typedef struct
   uint16_t key_long_press_ms;
   uint16_t servo_min_us[2];
   uint16_t servo_max_us[2];
+  uint16_t servo_travel_degrees[2];
+  uint16_t gripper_closed_degrees;
+  uint16_t gripper_open_degrees;
+  uint16_t gripper_release_degrees;
   int8_t motor_polarity[APP_MOTOR_COUNT];
   int8_t encoder_polarity[APP_MOTOR_COUNT];
 } AppConfig;

@@ -1,6 +1,8 @@
 #include "infrared_remote.h"
 
+#include "app_config.h"
 #include "main.h"
+#include "servo_control.h"
 
 /* TIM4 的 1 MHz 计数单位为微秒。以下窗口保留了接收头误差余量。 */
 #define IR_LEADER_MARK_MIN_US 8000U
@@ -32,6 +34,7 @@ static volatile InfraredRemoteDecodeState g_decode_state;
 static volatile uint8_t g_pending_command;
 static volatile uint8_t g_command_ready;
 static uint8_t g_last_command;
+static uint8_t g_grab_demo_step;
 
 static uint8_t InfraredRemote_InRange(uint16_t value, uint16_t minimum, uint16_t maximum)
 {
@@ -61,6 +64,7 @@ HAL_StatusTypeDef InfraredRemote_Init(TIM_HandleTypeDef *htim)
   g_pending_command = 0U;
   g_command_ready = 0U;
   g_last_command = 0U;
+  g_grab_demo_step = 0U;
 
   return HAL_TIM_IC_Start_IT(g_ir_timer, TIM_CHANNEL_4);
 }
@@ -166,6 +170,8 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim)
 
 void InfraredRemote_Process(void)
 {
+  AppConfig config;
+  uint16_t angle;
   uint8_t command;
   uint32_t primask;
 
@@ -182,6 +188,37 @@ void InfraredRemote_Process(void)
   __set_PRIMASK(primask);
 
   g_last_command = command;
+
+  if (command == IR_REMOTE_CMD_UP)
+  {
+    AppConfig_GetSnapshot(&config);
+    if (g_grab_demo_step == 0U)
+    {
+      angle = config.gripper_open_degrees;
+      g_grab_demo_step = 1U;
+    }
+    else if (g_grab_demo_step == 1U)
+    {
+      angle = config.gripper_closed_degrees;
+      g_grab_demo_step = 2U;
+    }
+    else
+    {
+      angle = config.gripper_release_degrees;
+      g_grab_demo_step = 0U;
+    }
+    ServoControl_SetAngle(0U, angle);
+  }
+  else if (command == IR_REMOTE_CMD_DOWN)
+  {
+    angle = ServoControl_GetAngle(0U);
+    angle = (angle < 10U) ? 0U : (uint16_t)(angle - 10U);
+    ServoControl_SetAngle(0U, angle);
+  }
+  else if (command == IR_REMOTE_CMD_POWER)
+  {
+    HAL_GPIO_TogglePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin);
+  }
 }
 
 uint8_t InfraredRemote_GetLastCommand(void)

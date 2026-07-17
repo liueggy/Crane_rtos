@@ -4,6 +4,7 @@
 #include "chassis_motion.h"
 #include "main.h"
 #include "safety_manager.h"
+#include "servo_control.h"
 #include "stepper_axis.h"
 #include "ui_manager.h"
 
@@ -60,8 +61,8 @@ void InputManager_Task(void)
       osDelay(config.key_debounce_ms);
       if (Pressed(KEY_RUN_STOP_GPIO_Port, KEY_RUN_STOP_Pin))
       {
-        if (UiManager_GetPage() == UI_PAGE_MOTOR_TUNING) ChassisMotion_AdjustPidTarget(10);
-        else ChassisMotion_SelectNextTestGear();
+        /* 当前实机调试：K0 按标准角度在 0、90、180 度之间往返。 */
+        ServoControl_StepAnglePingPong(0U, 90U);
         while (Pressed(KEY_RUN_STOP_GPIO_Port, KEY_RUN_STOP_Pin)) osDelay(10U);
       }
     }

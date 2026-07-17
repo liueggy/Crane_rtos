@@ -108,6 +108,13 @@ const osThreadAttr_t OLED_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for IR_REMOTE */
+osThreadId_t IR_REMOTEHandle;
+const osThreadAttr_t IR_REMOTE_attributes = {
+  .name = "IR_REMOTE",
+  .stack_size = 192 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 /* USER CODE END PV */
 
@@ -128,6 +135,7 @@ void StartStepperTask(void *argument);
 void StartK230RxTask(void *argument);
 void StartInputEvtTask(void *argument);
 void StartOledTask(void *argument);
+void StartInfraredTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -536,7 +544,7 @@ int main(void)
   {
     Error_Handler();
   }
-  ServoControl_SetAngle(0U, 90U);
+  ServoControl_SetAngle(0U, 0U);
   ServoControl_SetPulseUs(1U, config.servo_min_us[1]);
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
@@ -631,6 +639,9 @@ int main(void)
 
   /* creation of OLED */
   OLEDHandle = osThreadNew(StartOledTask, NULL, &OLED_attributes);
+
+  /* creation of IR_REMOTE */
+  IR_REMOTEHandle = osThreadNew(StartInfraredTask, NULL, &IR_REMOTE_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -1319,7 +1330,6 @@ void StartAppCtrlTask(void *argument)
   /* USER CODE BEGIN 5 */
   for(;;)
   {
-    InfraredRemote_Process();
     RobotController_Update();
     osDelay(10U);
   }
@@ -1415,6 +1425,25 @@ void StartOledTask(void *argument)
     osDelay(config.ui_refresh_period_ms);
   }
   /* USER CODE END StartOledTask */
+}
+
+/* USER CODE BEGIN Header_StartInfraredTask */
+/**
+  * @brief  NEC infrared command dispatch task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartInfraredTask */
+void StartInfraredTask(void *argument)
+{
+  /* USER CODE BEGIN StartInfraredTask */
+  for (;;)
+  {
+    /* 所有通过 NEC 校验的按键码均由此处取走并统一分发。 */
+    InfraredRemote_Process();
+    osDelay(10U);
+  }
+  /* USER CODE END StartInfraredTask */
 }
 
 /**
