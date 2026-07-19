@@ -8,6 +8,24 @@
 #define IR_REMOTE_CMD_POWER 0x45U
 #define IR_REMOTE_CMD_UP    0x46U
 #define IR_REMOTE_CMD_DOWN  0x15U
+#define IR_REMOTE_CMD_RIGHT 0x43U
+#define IR_REMOTE_CMD_LEFT  0x44U
+#define IR_REMOTE_CMD_1     0x16U
+#define IR_REMOTE_CMD_2     0x19U
+
+typedef enum
+{
+  IR_MOTION_STOP = 0,
+  IR_MOTION_FORWARD,
+  IR_MOTION_REVERSE
+} InfraredMotionState;
+
+typedef enum
+{
+  IR_CONTROL_AXIS_X = 0,
+  IR_CONTROL_AXIS_Z,
+  IR_CONTROL_AXIS_COUNT
+} InfraredControlAxis;
 
 /* 初始化 TIM4_CH4 红外接收；TIM4 计数频率必须为 1 MHz。 */
 HAL_StatusTypeDef InfraredRemote_Init(TIM_HandleTypeDef *htim);
@@ -19,5 +37,9 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim);
 void InfraredRemote_Process(void);
 
 uint8_t InfraredRemote_GetLastCommand(void);
+InfraredControlAxis InfraredRemote_GetSelectedAxis(void);
+InfraredMotionState InfraredRemote_GetSelectedMotionState(void);
+uint8_t InfraredRemote_GetSelectedDirectionReverse(void);
+uint8_t InfraredRemote_IsDirectionChangePending(void);
 
 #endif

@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/font.c
     Core/Src/app_config.c
     Core/Src/app_state.c
+    Core/Src/buzzer.c
     Core/Src/dc_motor.c
     Core/Src/encoder.c
     Core/Src/motor_control.c

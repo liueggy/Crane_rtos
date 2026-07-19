@@ -1,8 +1,9 @@
 #include "infrared_remote.h"
 
-#include "app_config.h"
 #include "main.h"
-#include "servo_control.h"
+#include "buzzer.h"
+#include "safety_manager.h"
+#include "stepper_axis.h"
 
 /* TIM4 的 1 MHz 计数单位为微秒。以下窗口保留了接收头误差余量。 */
 #define IR_LEADER_MARK_MIN_US 8000U
@@ -16,6 +17,8 @@
 #define IR_BIT_ONE_SPACE_MIN_US 1300U
 #define IR_BIT_ONE_SPACE_MAX_US 2100U
 #define IR_FRAME_BITS 32U
+#define IR_X_DIRECTION_CHANGE_DELAY_MS 300U
+#define IR_KEY_BEEP_DURATION_MS 60U
 
 typedef enum
 {
@@ -34,7 +37,62 @@ static volatile InfraredRemoteDecodeState g_decode_state;
 static volatile uint8_t g_pending_command;
 static volatile uint8_t g_command_ready;
 static uint8_t g_last_command;
-static uint8_t g_grab_demo_step;
+static volatile InfraredControlAxis g_selected_axis;
+static volatile InfraredMotionState g_motion_state[IR_CONTROL_AXIS_COUNT];
+static InfraredMotionState g_selected_direction[IR_CONTROL_AXIS_COUNT];
+static uint8_t g_direction_change_pending[IR_CONTROL_AXIS_COUNT];
+static uint32_t g_direction_resume_tick[IR_CONTROL_AXIS_COUNT];
+
+static StepperAxisId InfraredRemote_ToStepperAxis(InfraredControlAxis axis)
+{
+  return (axis == IR_CONTROL_AXIS_X) ? STEPPER_AXIS_X : STEPPER_AXIS_Z;
+}
+
+static void InfraredRemote_ApplyMotion(InfraredControlAxis axis, InfraredMotionState state)
+{
+  StepperAxisId stepper_axis = InfraredRemote_ToStepperAxis(axis);
+
+  if (state == IR_MOTION_STOP)
+  {
+    StepperAxis_SetEnabled(stepper_axis, 0U);
+    g_motion_state[axis] = IR_MOTION_STOP;
+    return;
+  }
+
+  /* 启动前先在无脉冲状态写入方向，避免 DIR 与首个脉冲距离过短。 */
+  StepperAxis_SetEnabled(stepper_axis, 0U);
+  StepperAxis_SetDirectionReverse(stepper_axis, (state == IR_MOTION_REVERSE) ? 1U : 0U);
+  StepperAxis_SetEnabled(stepper_axis, 1U);
+  g_motion_state[axis] = state;
+}
+
+static void InfraredRemote_SelectAxis(InfraredControlAxis axis)
+{
+  if (axis == g_selected_axis) return;
+
+  /* 手动调试只允许单轴运动，切轴时先关闭原轴。 */
+  InfraredRemote_ApplyMotion(g_selected_axis, IR_MOTION_STOP);
+  g_direction_change_pending[g_selected_axis] = 0U;
+  g_selected_axis = axis;
+}
+
+static void InfraredRemote_SelectDirection(InfraredControlAxis axis,
+                                           InfraredMotionState direction)
+{
+  InfraredRemote_SelectAxis(axis);
+  if ((g_motion_state[axis] != IR_MOTION_STOP) &&
+      (g_motion_state[axis] != direction))
+  {
+    InfraredRemote_ApplyMotion(axis, IR_MOTION_STOP);
+    g_direction_change_pending[axis] = 1U;
+    g_direction_resume_tick[axis] = HAL_GetTick() + IR_X_DIRECTION_CHANGE_DELAY_MS;
+  }
+  else if (g_direction_change_pending[axis] != 0U)
+  {
+    g_direction_resume_tick[axis] = HAL_GetTick() + IR_X_DIRECTION_CHANGE_DELAY_MS;
+  }
+  g_selected_direction[axis] = direction;
+}
 
 static uint8_t InfraredRemote_InRange(uint16_t value, uint16_t minimum, uint16_t maximum)
 {
@@ -64,7 +122,15 @@ HAL_StatusTypeDef InfraredRemote_Init(TIM_HandleTypeDef *htim)
   g_pending_command = 0U;
   g_command_ready = 0U;
   g_last_command = 0U;
-  g_grab_demo_step = 0U;
+  g_selected_axis = IR_CONTROL_AXIS_X;
+  for (uint8_t axis = 0U; axis < IR_CONTROL_AXIS_COUNT; ++axis)
+  {
+    g_motion_state[axis] = IR_MOTION_STOP;
+    g_selected_direction[axis] = IR_MOTION_FORWARD;
+    g_direction_change_pending[axis] = 0U;
+    g_direction_resume_tick[axis] = 0U;
+    InfraredRemote_ApplyMotion((InfraredControlAxis)axis, IR_MOTION_STOP);
+  }
 
   return HAL_TIM_IC_Start_IT(g_ir_timer, TIM_CHANNEL_4);
 }
@@ -170,10 +236,30 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim)
 
 void InfraredRemote_Process(void)
 {
-  AppConfig config;
-  uint16_t angle;
   uint8_t command;
+  uint8_t safety_fault;
   uint32_t primask;
+
+  /* 急停或限位故障优先级最高，禁止待执行命令重新启动 X 轴。 */
+  safety_fault = ((SafetyManager_GetFlags() &
+                  (SAFETY_FAULT_ESTOP | SAFETY_FAULT_LIMIT)) != 0U) ? 1U : 0U;
+  if (safety_fault != 0U)
+  {
+    for (uint8_t axis = 0U; axis < IR_CONTROL_AXIS_COUNT; ++axis)
+    {
+      InfraredRemote_ApplyMotion((InfraredControlAxis)axis, IR_MOTION_STOP);
+      g_direction_change_pending[axis] = 0U;
+    }
+  }
+
+  /* 换向采用“先停机、等待死区、再恢复”的非阻塞状态机。 */
+  if ((safety_fault == 0U) &&
+      (g_direction_change_pending[g_selected_axis] != 0U) &&
+      ((int32_t)(HAL_GetTick() - g_direction_resume_tick[g_selected_axis]) >= 0))
+  {
+    InfraredRemote_ApplyMotion(g_selected_axis, g_selected_direction[g_selected_axis]);
+    g_direction_change_pending[g_selected_axis] = 0U;
+  }
 
   if (g_command_ready == 0U)
   {
@@ -188,40 +274,72 @@ void InfraredRemote_Process(void)
   __set_PRIMASK(primask);
 
   g_last_command = command;
+  Buzzer_Beep(IR_KEY_BEEP_DURATION_MS);
+
+  /* 故障状态只确认收到按键，不执行任何电机动作。 */
+  if (safety_fault != 0U) return;
 
   if (command == IR_REMOTE_CMD_UP)
   {
-    AppConfig_GetSnapshot(&config);
-    if (g_grab_demo_step == 0U)
-    {
-      angle = config.gripper_open_degrees;
-      g_grab_demo_step = 1U;
-    }
-    else if (g_grab_demo_step == 1U)
-    {
-      angle = config.gripper_closed_degrees;
-      g_grab_demo_step = 2U;
-    }
-    else
-    {
-      angle = config.gripper_release_degrees;
-      g_grab_demo_step = 0U;
-    }
-    ServoControl_SetAngle(0U, angle);
+    InfraredRemote_SelectDirection(IR_CONTROL_AXIS_Z, IR_MOTION_FORWARD);
   }
   else if (command == IR_REMOTE_CMD_DOWN)
   {
-    angle = ServoControl_GetAngle(0U);
-    angle = (angle < 10U) ? 0U : (uint16_t)(angle - 10U);
-    ServoControl_SetAngle(0U, angle);
+    InfraredRemote_SelectDirection(IR_CONTROL_AXIS_Z, IR_MOTION_REVERSE);
+  }
+  else if (command == IR_REMOTE_CMD_RIGHT)
+  {
+    InfraredRemote_SelectDirection(IR_CONTROL_AXIS_X, IR_MOTION_FORWARD);
+  }
+  else if (command == IR_REMOTE_CMD_LEFT)
+  {
+    InfraredRemote_SelectDirection(IR_CONTROL_AXIS_X, IR_MOTION_REVERSE);
+  }
+  else if (command == IR_REMOTE_CMD_1)
+  {
+    InfraredRemote_SelectAxis(IR_CONTROL_AXIS_X);
+  }
+  else if (command == IR_REMOTE_CMD_2)
+  {
+    InfraredRemote_SelectAxis(IR_CONTROL_AXIS_Z);
   }
   else if (command == IR_REMOTE_CMD_POWER)
   {
-    HAL_GPIO_TogglePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin);
+    if (g_direction_change_pending[g_selected_axis] != 0U)
+    {
+      g_direction_change_pending[g_selected_axis] = 0U;
+      InfraredRemote_ApplyMotion(g_selected_axis, IR_MOTION_STOP);
+    }
+    else
+    {
+      InfraredRemote_ApplyMotion(g_selected_axis,
+          (g_motion_state[g_selected_axis] == IR_MOTION_STOP) ?
+          g_selected_direction[g_selected_axis] : IR_MOTION_STOP);
+    }
   }
 }
 
 uint8_t InfraredRemote_GetLastCommand(void)
 {
   return g_last_command;
+}
+
+InfraredControlAxis InfraredRemote_GetSelectedAxis(void)
+{
+  return g_selected_axis;
+}
+
+InfraredMotionState InfraredRemote_GetSelectedMotionState(void)
+{
+  return g_motion_state[g_selected_axis];
+}
+
+uint8_t InfraredRemote_GetSelectedDirectionReverse(void)
+{
+  return (g_selected_direction[g_selected_axis] == IR_MOTION_REVERSE) ? 1U : 0U;
+}
+
+uint8_t InfraredRemote_IsDirectionChangePending(void)
+{
+  return g_direction_change_pending[g_selected_axis];
 }

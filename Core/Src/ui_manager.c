@@ -5,6 +5,7 @@
 #include "font.h"
 #include "oled.h"
 #include "cmsis_os2.h"
+#include "infrared_remote.h"
 #include <stdio.h>
 
 #define OLED_I2C_ADDRESS 0x78U
@@ -95,6 +96,7 @@ void UiManager_Render(void)
 {
   AppConfig config;
   AppState state;
+  InfraredMotionState infrared_motion_state;
   char line[24];
   /* UI 只读快照，不直接修改控制参数或硬件。 */
   AppConfig_GetSnapshot(&config);
@@ -104,11 +106,12 @@ void UiManager_Render(void)
   switch (g_page)
   {
     case UI_PAGE_STEPPER:
-      DrawHeader("步进");
-      DrawLine(16, state.stepper_enabled ? "状态:运行" : "状态:停止");
-      DrawLine(32, state.stepper_direction_reverse ? "方向:反转" : "方向:正转");
-      (void)snprintf(line, sizeof(line), "脉冲:%u", (unsigned)state.stepper_pulse);
-      DrawLine(48, line);
+      DrawHeader("遥控步进");
+      infrared_motion_state = InfraredRemote_GetSelectedMotionState();
+      DrawLine(16, (InfraredRemote_GetSelectedAxis() == IR_CONTROL_AXIS_X) ? "选择:X轴" : "选择:Z轴");
+      DrawLine(32, (infrared_motion_state == IR_MOTION_STOP) ? "状态:停止" : "状态:运行");
+      if (InfraredRemote_IsDirectionChangePending()) DrawLine(48, "换向等待");
+      else DrawLine(48, InfraredRemote_GetSelectedDirectionReverse() ? "方向:反转" : "方向:正转");
       break;
 
     case UI_PAGE_MOTOR_SPEED:

@@ -25,6 +25,7 @@
 #include "app_config.h"
 #include "app_state.h"
 #include "chassis_motion.h"
+#include "buzzer.h"
 #include "dc_motor.h"
 #include "encoder.h"
 #include "input_manager.h"
@@ -525,6 +526,7 @@ int main(void)
   AppState_Init();
   Encoder_Init();
   SafetyManager_Init();
+  Buzzer_Init();
   ServoControl_Init(&htim2);
   StepperAxis_Init(&htim1);
   ChassisMotion_Init();
@@ -764,7 +766,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 71;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 499;
+  htim1.Init.Period = 399;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
@@ -967,6 +969,7 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
 
@@ -979,6 +982,15 @@ static void MX_TIM4_Init(void)
   htim4.Init.Period = 65535;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_IC_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
@@ -1441,6 +1453,7 @@ void StartInfraredTask(void *argument)
   {
     /* 所有通过 NEC 校验的按键码均由此处取走并统一分发。 */
     InfraredRemote_Process();
+    Buzzer_Process();
     osDelay(10U);
   }
   /* USER CODE END StartInfraredTask */
