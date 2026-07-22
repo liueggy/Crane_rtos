@@ -12,6 +12,12 @@
 #define IR_REMOTE_CMD_LEFT  0x44U
 #define IR_REMOTE_CMD_1     0x16U
 #define IR_REMOTE_CMD_2     0x19U
+#define IR_REMOTE_CMD_3     0x0DU
+#define IR_REMOTE_CMD_4     0x0CU
+#define IR_REMOTE_CMD_5     0x18U
+#define IR_REMOTE_CMD_6     0x5EU
+
+#define IR_REMOTE_DC_MOTOR_COUNT 4U
 
 typedef enum
 {

@@ -46,6 +46,19 @@ void ServoControl_SetAngle(uint8_t index, uint16_t angle)
   g_angle[index] = angle;
 }
 
+void ServoControl_AdjustAngle(uint8_t index, int16_t delta_degrees)
+{
+  AppConfig config;
+  int32_t target;
+  if (index >= 2U) return;
+  AppConfig_GetSnapshot(&config);
+  target = (int32_t)g_angle[index] + delta_degrees;
+  if (target < 0) target = 0;
+  if (target > (int32_t)config.servo_travel_degrees[index])
+    target = (int32_t)config.servo_travel_degrees[index];
+  ServoControl_SetAngle(index, (uint16_t)target);
+}
+
 void ServoControl_StepAnglePingPong(uint8_t index, uint16_t step_degrees)
 {
   AppConfig config;

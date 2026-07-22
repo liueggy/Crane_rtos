@@ -7,6 +7,8 @@
 #include "ui_manager.h"
 #include <stdio.h>
 
+#define CHASSIS_REMOTE_TEST_PWM 75
+
 static volatile uint16_t g_test_pwm;
 static volatile uint8_t g_test_reverse;
 static volatile int16_t g_pid_target_rpm;
@@ -15,6 +17,11 @@ static uint8_t g_pid_mode;
 static uint8_t g_route_active;
 static uint32_t g_route_started_ms;
 static uint16_t g_route_timeout_ms;
+static volatile uint8_t g_remote_motor_enabled[APP_MOTOR_COUNT];
+static uint8_t g_remote_test_mode;
+static uint8_t g_remote_mode_applied;
+static volatile uint8_t g_remote_direction_reverse;
+static int16_t g_remote_applied_command[APP_MOTOR_COUNT];
 
 void ChassisMotion_Init(void)
 {
@@ -24,6 +31,14 @@ void ChassisMotion_Init(void)
   g_applied_command = 0;
   g_pid_mode = 0U;
   g_route_active = 0U;
+  g_remote_test_mode = 0U;
+  g_remote_mode_applied = 0U;
+  g_remote_direction_reverse = 0U;
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    g_remote_motor_enabled[i] = 0U;
+    g_remote_applied_command[i] = 0;
+  }
   AppState_SetDcTestState(0U, 0U, 0U);
 }
 
@@ -63,12 +78,62 @@ void ChassisMotion_AdjustPidTarget(int16_t delta_rpm)
   g_pid_target_rpm = (int16_t)target;
 }
 
+void ChassisMotion_SetRemoteMotorEnabled(uint8_t index, uint8_t enabled)
+{
+  if (index >= APP_MOTOR_COUNT) return;
+  g_remote_motor_enabled[index] = enabled ? 1U : 0U;
+  g_remote_test_mode = 1U;
+}
+
+uint8_t ChassisMotion_IsRemoteMotorEnabled(uint8_t index)
+{
+  if (index >= APP_MOTOR_COUNT) return 0U;
+  return g_remote_motor_enabled[index];
+}
+
+void ChassisMotion_ToggleRemoteAllMotors(void)
+{
+  uint8_t all_enabled = 1U;
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    if (!g_remote_motor_enabled[i]) all_enabled = 0U;
+  }
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    g_remote_motor_enabled[i] = all_enabled ? 0U : 1U;
+  }
+  g_remote_test_mode = 1U;
+}
+
+uint8_t ChassisMotion_ToggleRemoteDirection(void)
+{
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    if (g_remote_motor_enabled[i]) return 0U;
+  }
+  g_remote_direction_reverse ^= 1U;
+  g_remote_test_mode = 1U;
+  return 1U;
+}
+
+uint8_t ChassisMotion_IsRemoteDirectionReverse(void)
+{
+  return g_remote_direction_reverse;
+}
+
 void ChassisMotion_Stop(void)
 {
   g_test_pwm = 0U;
   g_pid_target_rpm = 0;
   g_applied_command = 0;
   g_route_active = 0U;
+  g_remote_test_mode = 0U;
+  g_remote_mode_applied = 0U;
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    g_remote_motor_enabled[i] = 0U;
+    g_remote_applied_command[i] = 0;
+  }
   MotorControl_Reset();
   AppState_SetRunEnabled(0U);
   AppState_SetDcTestState(0U, g_test_reverse, 0U);
@@ -111,6 +176,28 @@ void ChassisMotion_TaskStep(void)
   if (g_route_active)
   {
     MotorControl_Update(1U);
+    return;
+  }
+  if (g_remote_test_mode)
+  {
+    if (!g_remote_mode_applied)
+    {
+      MotorControl_Reset();
+      g_remote_mode_applied = 1U;
+    }
+    for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+    {
+      int16_t target = 0;
+      if (g_remote_motor_enabled[i])
+      {
+        target = g_remote_direction_reverse ?
+                 -CHASSIS_REMOTE_TEST_PWM : CHASSIS_REMOTE_TEST_PWM;
+      }
+      if (target == 0) g_remote_applied_command[i] = 0;
+      else if (g_remote_applied_command[i] < target) ++g_remote_applied_command[i];
+      else if (g_remote_applied_command[i] > target) --g_remote_applied_command[i];
+    }
+    MotorControl_UpdateOpenLoop(g_remote_applied_command);
     return;
   }
   tuning_page = (UiManager_GetPage() == UI_PAGE_MOTOR_TUNING) ? 1U : 0U;

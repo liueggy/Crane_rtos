@@ -2,16 +2,18 @@
 
 #include "app_config.h"
 #include "app_state.h"
+#include "chassis_motion.h"
 #include "font.h"
 #include "oled.h"
 #include "cmsis_os2.h"
 #include "infrared_remote.h"
+#include "servo_control.h"
 #include <stdio.h>
 
 #define OLED_I2C_ADDRESS 0x78U
 
 /* 当前页面只保存页面编号，具体内容由 Render 根据状态快照绘制。 */
-static UiPage g_page = UI_PAGE_OVERVIEW;
+static UiPage g_page = UI_PAGE_SERVO;
 
 static void UiDelay(uint32_t delay_ms)
 {
@@ -72,7 +74,7 @@ void UiManager_Init(I2C_HandleTypeDef *i2c)
 {
   OLED_Init(i2c, OLED_I2C_ADDRESS);
   PlayBootAnimation();
-  UiManager_SetPage(UI_PAGE_OVERVIEW);
+  UiManager_SetPage(UI_PAGE_SERVO);
 }
 
 void UiManager_NextPage(void)
@@ -114,21 +116,31 @@ void UiManager_Render(void)
       else DrawLine(48, InfraredRemote_GetSelectedDirectionReverse() ? "方向:反转" : "方向:正转");
       break;
 
+    case UI_PAGE_SERVO:
+      DrawHeader("SERVO TEST");
+      (void)snprintf(line, sizeof(line), "ANGLE:%u DEG",
+                     (unsigned)ServoControl_GetAngle(0U));
+      DrawAsciiLine(18, line);
+      (void)snprintf(line, sizeof(line), "PULSE:%u us",
+                     (unsigned)ServoControl_GetPulseUs(0U));
+      DrawAsciiLine(32, line);
+      DrawAsciiLine(46, "UP:+45  DOWN:-45");
+      break;
+
     case UI_PAGE_MOTOR_SPEED:
       DrawHeader("减速电机");
-      (void)snprintf(line, sizeof(line), "M1 G:%u/%u %s",
-                     (unsigned)state.dc_test_gear,
-                     (unsigned)((config.motor_test_pwm_limit + config.motor_test_pwm_step - 1U) /
-                                config.motor_test_pwm_step),
-                     state.dc_test_direction_reverse ? "REV" : "FWD");
-      DrawAsciiLine(18, line);
-      (void)snprintf(line, sizeof(line), "PWM:%+d T:%u%%",
-                     (int)state.pwm_command[0], (unsigned)state.dc_test_pwm_target);
-      DrawAsciiLine(30, line);
-      (void)snprintf(line, sizeof(line), "RPM:%+d", RoundedInt(state.measured_rpm[0]));
-      DrawAsciiLine(42, line);
-      (void)snprintf(line, sizeof(line), "CNT:%ld", (long)state.encoder_count[0]);
-      DrawAsciiLine(54, line);
+      (void)snprintf(line, sizeof(line), "DIR:%s  PWM:75",
+                     ChassisMotion_IsRemoteDirectionReverse() ? "REV" : "FWD");
+      DrawAsciiLine(16, line);
+      (void)snprintf(line, sizeof(line), "M1:%s  M2:%s",
+                     ChassisMotion_IsRemoteMotorEnabled(0U) ? "RUN" : "STOP",
+                     ChassisMotion_IsRemoteMotorEnabled(1U) ? "RUN" : "STOP");
+      DrawAsciiLine(28, line);
+      (void)snprintf(line, sizeof(line), "M3:%s  M4:%s",
+                     ChassisMotion_IsRemoteMotorEnabled(2U) ? "RUN" : "STOP",
+                     ChassisMotion_IsRemoteMotorEnabled(3U) ? "RUN" : "STOP");
+      DrawAsciiLine(40, line);
+      DrawAsciiLine(52, "1-4:ONE 5:ALL 6:DIR");
       break;
 
     case UI_PAGE_MOTOR_TUNING:

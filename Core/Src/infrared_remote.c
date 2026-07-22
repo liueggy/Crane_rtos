@@ -2,8 +2,11 @@
 
 #include "main.h"
 #include "buzzer.h"
+#include "chassis_motion.h"
 #include "safety_manager.h"
+#include "servo_control.h"
 #include "stepper_axis.h"
+#include "ui_manager.h"
 
 /* TIM4 的 1 MHz 计数单位为微秒。以下窗口保留了接收头误差余量。 */
 #define IR_LEADER_MARK_MIN_US 8000U
@@ -42,6 +45,17 @@ static volatile InfraredMotionState g_motion_state[IR_CONTROL_AXIS_COUNT];
 static InfraredMotionState g_selected_direction[IR_CONTROL_AXIS_COUNT];
 static uint8_t g_direction_change_pending[IR_CONTROL_AXIS_COUNT];
 static uint32_t g_direction_resume_tick[IR_CONTROL_AXIS_COUNT];
+static int8_t InfraredRemote_GetDcMotorTestIndex(uint8_t command)
+{
+  switch (command)
+  {
+    case IR_REMOTE_CMD_1: return 0;
+    case IR_REMOTE_CMD_2: return 1;
+    case IR_REMOTE_CMD_3: return 2;
+    case IR_REMOTE_CMD_4: return 3;
+    default: return -1;
+  }
+}
 
 static StepperAxisId InfraredRemote_ToStepperAxis(InfraredControlAxis axis)
 {
@@ -238,6 +252,7 @@ void InfraredRemote_Process(void)
 {
   uint8_t command;
   uint8_t safety_fault;
+  int8_t dc_motor_test_index;
   uint32_t primask;
 
   /* 急停或限位故障优先级最高，禁止待执行命令重新启动 X 轴。 */
@@ -279,13 +294,38 @@ void InfraredRemote_Process(void)
   /* 故障状态只确认收到按键，不执行任何电机动作。 */
   if (safety_fault != 0U) return;
 
+  /* 数字 1~4 交给底盘任务执行，避免与 10ms 电机控制周期争用 PWM。 */
+  dc_motor_test_index = InfraredRemote_GetDcMotorTestIndex(command);
+  if (dc_motor_test_index >= 0)
+  {
+    uint8_t index = (uint8_t)dc_motor_test_index;
+    ChassisMotion_SetRemoteMotorEnabled(
+        index, ChassisMotion_IsRemoteMotorEnabled(index) ? 0U : 1U);
+    UiManager_SetPage(UI_PAGE_MOTOR_SPEED);
+    return;
+  }
+  if (command == IR_REMOTE_CMD_5)
+  {
+    ChassisMotion_ToggleRemoteAllMotors();
+    UiManager_SetPage(UI_PAGE_MOTOR_SPEED);
+    return;
+  }
+  if (command == IR_REMOTE_CMD_6)
+  {
+    (void)ChassisMotion_ToggleRemoteDirection();
+    UiManager_SetPage(UI_PAGE_MOTOR_SPEED);
+    return;
+  }
+
   if (command == IR_REMOTE_CMD_UP)
   {
-    InfraredRemote_SelectDirection(IR_CONTROL_AXIS_Z, IR_MOTION_FORWARD);
+    ServoControl_AdjustAngle(0U, 45);
+    UiManager_SetPage(UI_PAGE_SERVO);
   }
   else if (command == IR_REMOTE_CMD_DOWN)
   {
-    InfraredRemote_SelectDirection(IR_CONTROL_AXIS_Z, IR_MOTION_REVERSE);
+    ServoControl_AdjustAngle(0U, -45);
+    UiManager_SetPage(UI_PAGE_SERVO);
   }
   else if (command == IR_REMOTE_CMD_RIGHT)
   {
@@ -294,14 +334,6 @@ void InfraredRemote_Process(void)
   else if (command == IR_REMOTE_CMD_LEFT)
   {
     InfraredRemote_SelectDirection(IR_CONTROL_AXIS_X, IR_MOTION_REVERSE);
-  }
-  else if (command == IR_REMOTE_CMD_1)
-  {
-    InfraredRemote_SelectAxis(IR_CONTROL_AXIS_X);
-  }
-  else if (command == IR_REMOTE_CMD_2)
-  {
-    InfraredRemote_SelectAxis(IR_CONTROL_AXIS_Z);
   }
   else if (command == IR_REMOTE_CMD_POWER)
   {

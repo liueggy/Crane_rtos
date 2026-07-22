@@ -25,11 +25,12 @@ static const AppConfig k_default_config = {
   .key_long_press_ms = 800U,
   .servo_min_us = {500U, 1000U},
   .servo_max_us = {2500U, 2000U},
-  .servo_travel_degrees = {180U, 180U},
+  .servo_travel_degrees = {270U, 180U},
   .gripper_closed_degrees = 45U,
   .gripper_open_degrees = 110U,
   .gripper_release_degrees = 65U,
-  .motor_polarity = {1, 1, 1, 1},
+  /* 整车规定正方向：M1/M2安装方向相反，需在驱动层反相。 */
+  .motor_polarity = {-1, -1, 1, 1},
   .encoder_polarity = {1, 1, 1, 1},
 };
 

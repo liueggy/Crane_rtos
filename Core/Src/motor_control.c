@@ -151,6 +151,30 @@ void MotorControl_UpdateOpenLoopSingle(uint8_t index, int16_t pwm_command)
   }
 }
 
+void MotorControl_UpdateOpenLoop(const int16_t pwm_command[APP_MOTOR_COUNT])
+{
+  AppConfig config;
+  if (pwm_command == NULL) return;
+  AppConfig_GetSnapshot(&config);
+
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    int32_t delta = Encoder_GetDelta(i);
+    float raw_rpm = ((float)delta * 60000.0f) /
+                    (config.encoder_counts_per_output_rev *
+                     (float)config.motor_control_period_ms);
+
+    g_loops[i].requested_rpm = 0.0f;
+    g_loops[i].ramped_rpm = 0.0f;
+    g_loops[i].integral = 0.0f;
+    g_loops[i].measured_rpm +=
+        config.speed_filter_alpha * (raw_rpm - g_loops[i].measured_rpm);
+    DcMotor_SetCommand(i, pwm_command[i]);
+    AppState_SetMotorTelemetry(i, Encoder_GetCount(i), 0.0f,
+                               g_loops[i].measured_rpm, pwm_command[i]);
+  }
+}
+
 void MotorControl_UpdatePidSingle(uint8_t index, float target_rpm)
 {
   AppConfig config;
