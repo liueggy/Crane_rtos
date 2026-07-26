@@ -75,6 +75,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/motor_control.c
     Core/Src/ui_manager.c
     Core/Src/servo_control.c
+    Core/Src/camera_tilt.c
+    Core/Src/photo_sensor.c
     Core/Src/stepper_axis.c
     Core/Src/chassis_motion.c
     Core/Src/safety_manager.c

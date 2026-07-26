@@ -16,6 +16,12 @@
 #define IR_REMOTE_CMD_4     0x0CU
 #define IR_REMOTE_CMD_5     0x18U
 #define IR_REMOTE_CMD_6     0x5EU
+#define IR_REMOTE_CMD_7     0x08U
+#define IR_REMOTE_CMD_8     0x1CU
+#define IR_REMOTE_CMD_9     0x5AU
+#define IR_REMOTE_CMD_0     0x42U
+#define IR_REMOTE_CMD_VOL_MINUS 0x07U
+#define IR_REMOTE_CMD_VOL_PLUS  0x09U
 
 #define IR_REMOTE_DC_MOTOR_COUNT 4U
 
@@ -33,6 +39,15 @@ typedef enum
   IR_CONTROL_AXIS_COUNT
 } InfraredControlAxis;
 
+typedef enum
+{
+  IR_CONTROL_TARGET_CHASSIS = 0,
+  IR_CONTROL_TARGET_X,
+  IR_CONTROL_TARGET_Z,
+  IR_CONTROL_TARGET_SERVO_1,
+  IR_CONTROL_TARGET_SERVO_2
+} InfraredControlTarget;
+
 /* 初始化 TIM4_CH4 红外接收；TIM4 计数频率必须为 1 MHz。 */
 HAL_StatusTypeDef InfraredRemote_Init(TIM_HandleTypeDef *htim);
 
@@ -41,11 +56,16 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim);
 
 /* 在普通任务上下文中执行已解码的遥控命令。 */
 void InfraredRemote_Process(void);
+/* 页面变化后同步控制对象；总览/系统页会停止手动运动。 */
+void InfraredRemote_SyncToCurrentPage(void);
 
 uint8_t InfraredRemote_GetLastCommand(void);
 InfraredControlAxis InfraredRemote_GetSelectedAxis(void);
 InfraredMotionState InfraredRemote_GetSelectedMotionState(void);
 uint8_t InfraredRemote_GetSelectedDirectionReverse(void);
 uint8_t InfraredRemote_IsDirectionChangePending(void);
+InfraredControlTarget InfraredRemote_GetSelectedTarget(void);
+uint8_t InfraredRemote_GetSelectedServoIndex(void);
+uint32_t InfraredRemote_GetPulseInput(void);
 
 #endif

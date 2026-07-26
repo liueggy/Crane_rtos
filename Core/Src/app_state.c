@@ -104,17 +104,6 @@ void AppState_SetStepperTelemetry(uint8_t enabled, uint8_t direction_reverse,
   __set_PRIMASK(primask);
 }
 
-void AppState_SetDcTestState(uint8_t gear, uint8_t direction_reverse,
-                             uint16_t pwm_target)
-{
-  uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  g_state.dc_test_gear = gear;
-  g_state.dc_test_direction_reverse = direction_reverse ? 1U : 0U;
-  g_state.dc_test_pwm_target = pwm_target;
-  __set_PRIMASK(primask);
-}
-
 void AppState_SetMotorTelemetry(uint8_t index, int32_t count, float target_rpm,
                                 float measured_rpm, int16_t pwm_command)
 {

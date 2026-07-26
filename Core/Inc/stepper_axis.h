@@ -15,6 +15,23 @@ void StepperAxis_Init(TIM_HandleTypeDef *timer);
 void StepperAxis_SetEnabled(StepperAxisId axis, uint8_t enabled);
 void StepperAxis_SetDirectionReverse(StepperAxisId axis, uint8_t reverse);
 void StepperAxis_ToggleDirection(StepperAxisId axis);
+/* 非阻塞输出指定脉冲数；reverse=0/1对应当前定义的正向/反向。 */
+HAL_StatusTypeDef StepperAxis_MovePulses(StepperAxisId axis,
+                                         uint32_t pulse_count,
+                                         uint8_t reverse);
+void StepperAxis_HandlePulseFinished(TIM_HandleTypeDef *timer);
+uint8_t StepperAxis_IsPulseMoveActive(StepperAxisId axis);
+uint32_t StepperAxis_GetCommandedPulses(StepperAxisId axis);
+uint32_t StepperAxis_GetCompletedPulses(StepperAxisId axis);
+uint32_t StepperAxis_GetRemainingPulses(StepperAxisId axis);
+int32_t StepperAxis_GetPositionPulses(StepperAxisId axis);
+uint8_t StepperAxis_ResetPositionPulses(StepperAxisId axis);
+uint8_t StepperAxis_IsEnabled(StepperAxisId axis);
+uint8_t StepperAxis_IsHolding(StepperAxisId axis);
+void StepperAxis_SetHoldWhenStopped(StepperAxisId axis, uint8_t enabled);
+/* 在任务上下文处理PB11共用光电门的方向限位。 */
+void StepperAxis_ProcessPhotoInterlock(void);
+/* 安全停机：关闭脉冲并释放两路驱动器，不保留静态转矩。 */
 void StepperAxis_StopAll(void);
 void StepperAxis_UpdateTelemetry(void);
 

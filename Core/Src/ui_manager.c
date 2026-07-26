@@ -1,19 +1,21 @@
 #include "ui_manager.h"
 
-#include "app_config.h"
 #include "app_state.h"
 #include "chassis_motion.h"
 #include "font.h"
 #include "oled.h"
 #include "cmsis_os2.h"
 #include "infrared_remote.h"
+#include "k230_link.h"
 #include "servo_control.h"
+#include "stepper_axis.h"
 #include <stdio.h>
 
 #define OLED_I2C_ADDRESS 0x78U
+#define K230_DISPLAY_WIDTH 640U
 
 /* 当前页面只保存页面编号，具体内容由 Render 根据状态快照绘制。 */
-static UiPage g_page = UI_PAGE_SERVO;
+static UiPage g_page = UI_PAGE_OVERVIEW;
 
 static void UiDelay(uint32_t delay_ms)
 {
@@ -32,11 +34,6 @@ static void DrawLine(uint8_t y, const char *text)
   OLED_PrintString(0, y, (char *)text, &font16x16, OLED_COLOR_NORMAL);
 }
 
-static void DrawAsciiLine(uint8_t y, const char *text)
-{
-  OLED_PrintASCIIString(0, y, text, &afont12x6, OLED_COLOR_NORMAL);
-}
-
 static void DrawHeader(const char *title)
 {
   char page[8];
@@ -44,6 +41,109 @@ static void DrawHeader(const char *title)
   (void)snprintf(page, sizeof(page), "%u/%u", (unsigned)(g_page + 1U),
                  (unsigned)UI_PAGE_COUNT);
   OLED_PrintASCIIString(96, 0, page, &afont12x6, OLED_COLOR_NORMAL);
+}
+
+static const char *ControlTargetText(void)
+{
+  switch (InfraredRemote_GetSelectedTarget())
+  {
+    case IR_CONTROL_TARGET_CHASSIS: return "底盘";
+    case IR_CONTROL_TARGET_X: return "X轴";
+    case IR_CONTROL_TARGET_Z: return "Z轴";
+    case IR_CONTROL_TARGET_SERVO_1: return "旋转";
+    case IR_CONTROL_TARGET_SERVO_2: return "夹爪";
+    default: return "未选择";
+  }
+}
+
+static const char *VisionTaskText(uint8_t task)
+{
+  if (task == K230_TASK_NUMBER) return "数字";
+  if (task == K230_TASK_BEAN) return "豆子";
+  return "--";
+}
+
+static uint8_t VisionTargetSlot(uint16_t center_x, uint8_t slot_count)
+{
+  uint32_t slot = ((uint32_t)center_x * slot_count) / K230_DISPLAY_WIDTH;
+  if (slot >= slot_count) slot = slot_count - 1U;
+  return (uint8_t)slot;
+}
+
+static void DrawNumberVisionLayout(const K230VisionResult *vision)
+{
+  const uint8_t slot_count = 5U;
+  uint8_t values[5] = {0U};
+  uint8_t confidence[5] = {0U};
+
+  for (uint8_t i = 0U; i < vision->count; ++i)
+  {
+    const K230VisionTarget *target = &vision->targets[i];
+    if ((target->semantic < K230_SEMANTIC_NUMBER_1) ||
+        (target->semantic > K230_SEMANTIC_NUMBER_5)) continue;
+
+    uint8_t slot = VisionTargetSlot(target->center_x, slot_count);
+    if ((values[slot] == 0U) || (target->confidence_percent > confidence[slot]))
+    {
+      values[slot] = target->semantic;
+      confidence[slot] = target->confidence_percent;
+    }
+  }
+
+  for (uint8_t slot = 0U; slot < slot_count; ++slot)
+  {
+    uint8_t x = (uint8_t)(1U + slot * 25U);
+    char value[2] = {'-', '\0'};
+    if (values[slot] != 0U) value[0] = (char)('0' + values[slot]);
+    OLED_DrawRectangle(x, 21U, 23U, 27U, OLED_COLOR_NORMAL);
+    OLED_PrintASCIIString((uint8_t)(x + 8U), 29U, value, &afont16x8,
+                          OLED_COLOR_NORMAL);
+  }
+}
+
+static const char *BeanSlotText(uint8_t semantic)
+{
+  switch (semantic)
+  {
+    case K230_SEMANTIC_BEAN_L: return "绿";
+    case K230_SEMANTIC_BEAN_H: return "黄";
+    case K230_SEMANTIC_BEAN_B: return "白";
+    default: return "-";
+  }
+}
+
+static void DrawBeanVisionLayout(const K230VisionResult *vision)
+{
+  const uint8_t slot_count = 3U;
+  uint8_t values[3] = {0U};
+  uint8_t confidence[3] = {0U};
+
+  for (uint8_t i = 0U; i < vision->count; ++i)
+  {
+    const K230VisionTarget *target = &vision->targets[i];
+    if ((target->semantic != K230_SEMANTIC_BEAN_L) &&
+        (target->semantic != K230_SEMANTIC_BEAN_H) &&
+        (target->semantic != K230_SEMANTIC_BEAN_B)) continue;
+
+    uint8_t slot = VisionTargetSlot(target->center_x, slot_count);
+    if ((values[slot] == 0U) || (target->confidence_percent > confidence[slot]))
+    {
+      values[slot] = target->semantic;
+      confidence[slot] = target->confidence_percent;
+    }
+  }
+
+  for (uint8_t slot = 0U; slot < slot_count; ++slot)
+  {
+    uint8_t x = (uint8_t)(1U + slot * 42U);
+    OLED_DrawRectangle(x, 21U, 40U, 27U, OLED_COLOR_NORMAL);
+    if (values[slot] == 0U)
+      OLED_PrintASCIIString((uint8_t)(x + 17U), 29U, "-", &afont16x8,
+                            OLED_COLOR_NORMAL);
+    else
+      OLED_PrintString((uint8_t)(x + 12U), 27U, (char *)BeanSlotText(values[slot]),
+                       &font16x16, OLED_COLOR_NORMAL);
+  }
 }
 
 static void DrawBootFrame(uint8_t progress)
@@ -74,12 +174,18 @@ void UiManager_Init(I2C_HandleTypeDef *i2c)
 {
   OLED_Init(i2c, OLED_I2C_ADDRESS);
   PlayBootAnimation();
-  UiManager_SetPage(UI_PAGE_SERVO);
+  UiManager_SetPage(UI_PAGE_OVERVIEW);
 }
 
 void UiManager_NextPage(void)
 {
   UiManager_SetPage((UiPage)((g_page + 1U) % UI_PAGE_COUNT));
+}
+
+void UiManager_PreviousPage(void)
+{
+  UiManager_SetPage((g_page == UI_PAGE_OVERVIEW) ?
+                    (UiPage)(UI_PAGE_COUNT - 1U) : (UiPage)(g_page - 1U));
 }
 
 void UiManager_SetPage(UiPage page)
@@ -96,98 +202,136 @@ UiPage UiManager_GetPage(void)
 
 void UiManager_Render(void)
 {
-  AppConfig config;
   AppState state;
+  K230VisionResult vision;
   InfraredMotionState infrared_motion_state;
-  char line[24];
+  int average_rpm;
+  char line[32];
   /* UI 只读快照，不直接修改控制参数或硬件。 */
-  AppConfig_GetSnapshot(&config);
   AppState_GetSnapshot(&state);
   OLED_NewFrame();
 
   switch (g_page)
   {
     case UI_PAGE_STEPPER:
-      DrawHeader("遥控步进");
+    {
+      StepperAxisId axis = (InfraredRemote_GetSelectedAxis() == IR_CONTROL_AXIS_X) ?
+                           STEPPER_AXIS_X : STEPPER_AXIS_Z;
+      DrawHeader("步进控制");
       infrared_motion_state = InfraredRemote_GetSelectedMotionState();
-      DrawLine(16, (InfraredRemote_GetSelectedAxis() == IR_CONTROL_AXIS_X) ? "选择:X轴" : "选择:Z轴");
-      DrawLine(32, (infrared_motion_state == IR_MOTION_STOP) ? "状态:停止" : "状态:运行");
-      if (InfraredRemote_IsDirectionChangePending()) DrawLine(48, "换向等待");
-      else DrawLine(48, InfraredRemote_GetSelectedDirectionReverse() ? "方向:反转" : "方向:正转");
+      (void)snprintf(line, sizeof(line), "选择:%c轴 %s",
+                     (axis == STEPPER_AXIS_X) ? 'X' : 'Z',
+                     InfraredRemote_GetSelectedDirectionReverse() ? "反转" : "正转");
+      DrawLine(16, line);
+      if (InfraredRemote_IsDirectionChangePending()) DrawLine(32, "状态:换向等待");
+      else if (infrared_motion_state != IR_MOTION_STOP) DrawLine(32, "状态:运行");
+      else if (StepperAxis_IsHolding(axis)) DrawLine(32, "状态:保位");
+      else DrawLine(32, "状态:停止");
+      (void)snprintf(line, sizeof(line), "脉冲:%ld",
+                     (long)StepperAxis_GetPositionPulses(axis));
+      DrawLine(48, line);
       break;
+    }
+
+    case UI_PAGE_STEPPER_PULSE:
+    {
+      StepperAxisId axis = (InfraredRemote_GetSelectedAxis() == IR_CONTROL_AXIS_X) ?
+                           STEPPER_AXIS_X : STEPPER_AXIS_Z;
+      DrawHeader("脉冲控制");
+      (void)snprintf(line, sizeof(line), "选择:%c轴 %s",
+                     (axis == STEPPER_AXIS_X) ? 'X' : 'Z',
+                     InfraredRemote_GetSelectedDirectionReverse() ? "反转" : "正转");
+      DrawLine(16, line);
+      (void)snprintf(line, sizeof(line), "目标:%lu",
+                     (unsigned long)InfraredRemote_GetPulseInput());
+      DrawLine(32, line);
+      (void)snprintf(line, sizeof(line), "实际:%lu %s",
+                     (unsigned long)StepperAxis_GetCompletedPulses(axis),
+                     StepperAxis_IsPulseMoveActive(axis) ? "运行" : "停止");
+      DrawLine(48, line);
+      break;
+    }
 
     case UI_PAGE_SERVO:
-      DrawHeader("SERVO TEST");
-      (void)snprintf(line, sizeof(line), "ANGLE:%u DEG",
-                     (unsigned)ServoControl_GetAngle(0U));
-      DrawAsciiLine(18, line);
-      (void)snprintf(line, sizeof(line), "PULSE:%u us",
-                     (unsigned)ServoControl_GetPulseUs(0U));
-      DrawAsciiLine(32, line);
-      DrawAsciiLine(46, "UP:+45  DOWN:-45");
+    {
+      uint8_t servo = InfraredRemote_GetSelectedServoIndex();
+      DrawHeader("舵机控制");
+      (void)snprintf(line, sizeof(line), "选择:%s", (servo == 0U) ? "旋转" : "夹爪");
+      DrawLine(16, line);
+      (void)snprintf(line, sizeof(line), "角度:%u",
+                     (unsigned)ServoControl_GetAngle(servo));
+      DrawLine(32, line);
+      (void)snprintf(line, sizeof(line), "脉冲:%u",
+                     (unsigned)ServoControl_GetPulseUs(servo));
+      DrawLine(48, line);
       break;
+    }
 
     case UI_PAGE_MOTOR_SPEED:
-      DrawHeader("减速电机");
-      (void)snprintf(line, sizeof(line), "DIR:%s  PWM:75",
-                     ChassisMotion_IsRemoteDirectionReverse() ? "REV" : "FWD");
-      DrawAsciiLine(16, line);
-      (void)snprintf(line, sizeof(line), "M1:%s  M2:%s",
-                     ChassisMotion_IsRemoteMotorEnabled(0U) ? "RUN" : "STOP",
-                     ChassisMotion_IsRemoteMotorEnabled(1U) ? "RUN" : "STOP");
-      DrawAsciiLine(28, line);
-      (void)snprintf(line, sizeof(line), "M3:%s  M4:%s",
-                     ChassisMotion_IsRemoteMotorEnabled(2U) ? "RUN" : "STOP",
-                     ChassisMotion_IsRemoteMotorEnabled(3U) ? "RUN" : "STOP");
-      DrawAsciiLine(40, line);
-      DrawAsciiLine(52, "1-4:ONE 5:ALL 6:DIR");
+      DrawHeader("底盘控制");
+      average_rpm = (RoundedInt(state.measured_rpm[0]) +
+                     RoundedInt(state.measured_rpm[1]) +
+                     RoundedInt(state.measured_rpm[2]) +
+                     RoundedInt(state.measured_rpm[3])) / 4;
+      DrawLine(16, ChassisMotion_IsRunning() ? "状态:运行" : "状态:停止");
+      (void)snprintf(line, sizeof(line), "速度:%d/%d", average_rpm,
+                     (int)ChassisMotion_GetTargetRpm());
+      DrawLine(32, line);
+      DrawLine(48, ChassisMotion_IsDirectionReverse() ?
+               "方向:反转" : "方向:正转");
       break;
 
-    case UI_PAGE_MOTOR_TUNING:
-      DrawHeader("闭环控制");
-      (void)snprintf(line, sizeof(line), "T:%+d R:%+d",
-                     RoundedInt(state.target_rpm[0]), RoundedInt(state.measured_rpm[0]));
-      DrawAsciiLine(18, line);
-      (void)snprintf(line, sizeof(line), "PWM:%+d CNT:%ld",
-                     (int)state.pwm_command[0], (long)state.encoder_count[0]);
-      DrawAsciiLine(30, line);
-      (void)snprintf(line, sizeof(line), "Kp:%d.%02d Ki:%d.%02d",
-                     (int)config.speed_kp[0], ((int)(config.speed_kp[0] * 100.0f)) % 100,
-                     (int)config.speed_ki[0], ((int)(config.speed_ki[0] * 100.0f)) % 100);
-      DrawAsciiLine(42, line);
-      (void)snprintf(line, sizeof(line), "FF:%d.%02d SY:%d.%02d",
-                     (int)config.speed_feedforward[0], ((int)(config.speed_feedforward[0] * 100.0f)) % 100,
-                     (int)config.speed_sync_kp, ((int)(config.speed_sync_kp * 100.0f)) % 100);
-      DrawAsciiLine(54, line);
-      /* CPR和控制周期继续保留在配置代码中，避免挤占实时观测区域。 */
-      (void)config.encoder_counts_per_output_rev;
-      (void)config.motor_control_period_ms;
-      break;
-
-    case UI_PAGE_ENCODER:
-      DrawHeader("编码器");
-      for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+    case UI_PAGE_VISION:
+      DrawHeader((K230Link_GetRequestedTask() == K230_TASK_BEAN) ?
+                 "豆子识别" : "数字识别");
+      if (K230Link_GetTaskSwitchState() == K230_TASK_SWITCH_PENDING)
       {
-        (void)snprintf(line, sizeof(line), "M%u CNT:%ld", (unsigned)(i + 1U),
-                       (long)state.encoder_count[i]);
-        DrawAsciiLine((uint8_t)(18U + i * 11U), line);
+        (void)snprintf(line, sizeof(line), "任务:%s",
+                       VisionTaskText(K230Link_GetRequestedTask()));
+        DrawLine(16, line);
+        DrawLine(32, "状态:等待");
+        DrawLine(48, "按键:1数字2豆子");
+        break;
       }
+      if (K230Link_GetTaskSwitchState() == K230_TASK_SWITCH_FAILED)
+      {
+        DrawLine(16, "状态:失败");
+        DrawLine(32, "通信:超时");
+        DrawLine(48, "按键:1数字2豆子");
+        break;
+      }
+      if (!state.k230_online || !K230Link_GetLatestResult(&vision))
+      {
+        DrawLine(16, "状态:离线");
+        DrawLine(32, "通信:超时");
+        DrawLine(48, "按键:1数字2豆子");
+        break;
+      }
+
+      if (vision.task == K230_TASK_BEAN) DrawBeanVisionLayout(&vision);
+      else DrawNumberVisionLayout(&vision);
+      (void)snprintf(line, sizeof(line), "在线 数:%u",
+                     (unsigned)vision.count);
+      DrawLine(48, line);
       break;
 
     case UI_PAGE_SYSTEM:
-      DrawHeader("系统");
+      DrawHeader("系统状态");
       DrawLine(16, state.estop_active ? "急停:触发" : "急停:正常");
-      DrawLine(32, state.k230_online ? "K230:在线" : "K230:离线");
-      (void)snprintf(line, sizeof(line), "FAULT:%08lX", (unsigned long)state.fault_flags);
-      DrawAsciiLine(48, line);
+      DrawLine(32, state.k230_online ? "视觉:在线" : "视觉:离线");
+      (void)snprintf(line, sizeof(line), "故障:%08lX", (unsigned long)state.fault_flags);
+      DrawLine(48, line);
       break;
 
     case UI_PAGE_OVERVIEW:
     default:
       DrawHeader("总览");
-      DrawLine(16, state.run_enabled ? "运行:启动" : "运行:停止");
-      DrawLine(32, state.mode == APP_MODE_AUTO ? "模式:自动" : "模式:手动");
-      DrawLine(48, state.estop_active ? "安全:急停" : "安全:正常");
+      (void)snprintf(line, sizeof(line), "控制:%s", ControlTargetText());
+      DrawLine(16, line);
+      DrawLine(32, state.estop_active ? "安全:故障" : "安全:正常");
+      (void)snprintf(line, sizeof(line), "遥控:%02X",
+                     (unsigned)InfraredRemote_GetLastCommand());
+      DrawLine(48, line);
       break;
   }
   OLED_ShowFrame();

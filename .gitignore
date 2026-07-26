@@ -33,6 +33,9 @@ build.ninja
 *.suo
 *.swp
 *~
+__pycache__/
+*.pyc
+/tools/logs/
 
 # STM32CubeMX generated project cache
 /.mxproject
