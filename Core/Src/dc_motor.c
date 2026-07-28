@@ -17,8 +17,10 @@ typedef struct
 static const DcMotorHardware k_motor_hardware[APP_MOTOR_COUNT] = {
   {&htim3, TIM_CHANNEL_1, TIM_CHANNEL_2},
   {&htim3, TIM_CHANNEL_3, TIM_CHANNEL_4},
-  {&htim8, TIM_CHANNEL_1, TIM_CHANNEL_2},
+  /* 实机遥测确认M3/M4驱动线序与最初标号交叉：P3对应编码器4，
+   * P4对应编码器3。交换控制通道后，逻辑电机编号重新与反馈对齐。 */
   {&htim8, TIM_CHANNEL_3, TIM_CHANNEL_4},
+  {&htim8, TIM_CHANNEL_1, TIM_CHANNEL_2},
 };
 
 static int8_t g_motor_polarity[APP_MOTOR_COUNT];

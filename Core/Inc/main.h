@@ -70,6 +70,8 @@ void Error_Handler(void);
 #define KEY_RUN_STOP_EXTI_IRQn EXTI4_IRQn
 #define LED_STATUS_Pin GPIO_PIN_5
 #define LED_STATUS_GPIO_Port GPIOE
+#define BEEP_Pin GPIO_PIN_6
+#define BEEP_GPIO_Port GPIOE
 #define DC_M1_UNUSED_1_Pin GPIO_PIN_0
 #define DC_M1_UNUSED_1_GPIO_Port GPIOC
 #define DC_M1_UNUSED_2_Pin GPIO_PIN_1
@@ -106,6 +108,15 @@ void Error_Handler(void);
 #define STEP_X_PUL_GPIO_Port GPIOE
 #define STEP_Z_PUL_Pin GPIO_PIN_11
 #define STEP_Z_PUL_GPIO_Port GPIOE
+#define PHOTO_SENSOR_1_Pin GPIO_PIN_11
+#define PHOTO_SENSOR_1_GPIO_Port GPIOB
+#define PHOTO_SENSOR_1_EXTI_IRQn EXTI15_10_IRQn
+#define PHOTO_SENSOR_2_Pin GPIO_PIN_12
+#define PHOTO_SENSOR_2_GPIO_Port GPIOB
+#define PHOTO_SENSOR_2_EXTI_IRQn EXTI15_10_IRQn
+#define PHOTO_SENSOR_3_Pin GPIO_PIN_8
+#define PHOTO_SENSOR_3_GPIO_Port GPIOD
+#define PHOTO_SENSOR_3_EXTI_IRQn EXTI9_5_IRQn
 #define ENC_M1_A_Pin GPIO_PIN_10
 #define ENC_M1_A_GPIO_Port GPIOD
 #define ENC_M1_A_EXTI_IRQn EXTI15_10_IRQn
@@ -148,8 +159,8 @@ void Error_Handler(void);
 #define OLED_SCL_GPIO_Port GPIOB
 #define OLED_SDA_Pin GPIO_PIN_7
 #define OLED_SDA_GPIO_Port GPIOB
-#define BEEP_Pin GPIO_PIN_8
-#define BEEP_GPIO_Port GPIOB
+#define CAMERA_TILT_PWM_Pin GPIO_PIN_8
+#define CAMERA_TILT_PWM_GPIO_Port GPIOB
 #define IR_REMOTE_RX_Pin GPIO_PIN_9
 #define IR_REMOTE_RX_GPIO_Port GPIOB
 #define LIMIT_X_MIN_Pin GPIO_PIN_0

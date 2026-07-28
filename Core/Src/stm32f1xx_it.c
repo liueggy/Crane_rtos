@@ -55,6 +55,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim4;
 extern DMA_HandleTypeDef hdma_usart2_rx;
 extern DMA_HandleTypeDef hdma_usart2_tx;
@@ -268,14 +269,30 @@ void EXTI9_5_IRQHandler(void)
 {
   /* USER CODE BEGIN EXTI9_5_IRQn 0 */
 
-  /* PC5 与 PE7 共用 EXTI9_5 中断组，两个挂起源都必须分别交给 HAL 分发。 */
+  /* PC5、PE7、PD8共用EXTI9_5中断组，各挂起源必须分别交给HAL分发。 */
   HAL_GPIO_EXTI_IRQHandler(LIMIT_Z_MIN_Pin);
+  HAL_GPIO_EXTI_IRQHandler(PHOTO_SENSOR_3_Pin);
 
   /* USER CODE END EXTI9_5_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(ESTOP_IN_Pin);
+  HAL_GPIO_EXTI_IRQHandler(PHOTO_SENSOR_3_Pin);
   /* USER CODE BEGIN EXTI9_5_IRQn 1 */
 
   /* USER CODE END EXTI9_5_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM1 capture compare interrupt.
+  */
+void TIM1_CC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_CC_IRQn 0 */
+
+  /* USER CODE END TIM1_CC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_CC_IRQn 1 */
+
+  /* USER CODE END TIM1_CC_IRQn 1 */
 }
 
 /**
@@ -315,6 +332,8 @@ void EXTI15_10_IRQHandler(void)
 
   /* USER CODE END EXTI15_10_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(ENC_M1_A_Pin);
+  HAL_GPIO_EXTI_IRQHandler(PHOTO_SENSOR_1_Pin);
+  HAL_GPIO_EXTI_IRQHandler(PHOTO_SENSOR_2_Pin);
   HAL_GPIO_EXTI_IRQHandler(ENC_M2_A_Pin);
   HAL_GPIO_EXTI_IRQHandler(ENC_M3_A_Pin);
   HAL_GPIO_EXTI_IRQHandler(ENC_M4_A_Pin);

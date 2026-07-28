@@ -1,10 +1,9 @@
 #include "input_manager.h"
 
 #include "app_config.h"
-#include "chassis_motion.h"
+#include "infrared_remote.h"
 #include "main.h"
 #include "safety_manager.h"
-#include "stepper_axis.h"
 #include "ui_manager.h"
 
 #define INPUT_FLAG_KEY0 (1UL << 0)
@@ -60,23 +59,20 @@ void InputManager_Task(void)
       osDelay(config.key_debounce_ms);
       if (Pressed(KEY_RUN_STOP_GPIO_Port, KEY_RUN_STOP_Pin))
       {
-        if (UiManager_GetPage() == UI_PAGE_MOTOR_TUNING) ChassisMotion_AdjustPidTarget(10);
-        else ChassisMotion_SelectNextTestGear();
+        UiManager_PreviousPage();
+        InfraredRemote_SyncToCurrentPage();
         while (Pressed(KEY_RUN_STOP_GPIO_Port, KEY_RUN_STOP_Pin)) osDelay(10U);
       }
     }
     if ((flags & INPUT_FLAG_KEY1) != 0U)
     {
-      uint32_t pressed_ms = 0U;
       osDelay(config.key_debounce_ms);
       while (Pressed(KEY_DIR_TOGGLE_GPIO_Port, KEY_DIR_TOGGLE_Pin))
       {
         osDelay(10U);
-        pressed_ms += 10U;
       }
-      if (pressed_ms >= config.key_long_press_ms) UiManager_NextPage();
-      else if (UiManager_GetPage() == UI_PAGE_MOTOR_TUNING) ChassisMotion_AdjustPidTarget(-10);
-      else StepperAxis_ToggleDirection(STEPPER_AXIS_Z);
+      UiManager_NextPage();
+      InfraredRemote_SyncToCurrentPage();
     }
   }
 }

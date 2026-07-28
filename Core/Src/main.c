@@ -24,18 +24,27 @@
 /* USER CODE BEGIN Includes */
 #include "app_config.h"
 #include "app_state.h"
+#include "box_calibration.h"
 #include "chassis_motion.h"
+#include "buzzer.h"
 #include "dc_motor.h"
+#include "drop_demo.h"
 #include "encoder.h"
 #include "input_manager.h"
 #include "infrared_remote.h"
+#include "initialization_debug.h"
 #include "k230_link.h"
 #include "motor_control.h"
+#include "odometry_calibration.h"
 #include "robot_controller.h"
 #include "safety_manager.h"
 #include "servo_control.h"
+#include "camera_tilt.h"
+#include "photo_sensor.h"
 #include "stepper_axis.h"
 #include "ui_manager.h"
+#include "z_calibration.h"
+#include "vision_route_demo.h"
 
 /* USER CODE END Includes */
 
@@ -70,20 +79,13 @@ DMA_HandleTypeDef hdma_usart2_tx;
 osThreadId_t APP_CTRLHandle;
 const osThreadAttr_t APP_CTRL_attributes = {
   .name = "APP_CTRL",
-  .stack_size = 256 * 4,
+  .stack_size = 192 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for DC_MOTOR */
 osThreadId_t DC_MOTORHandle;
 const osThreadAttr_t DC_MOTOR_attributes = {
   .name = "DC_MOTOR",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
-};
-/* Definitions for STEPPER */
-osThreadId_t STEPPERHandle;
-const osThreadAttr_t STEPPER_attributes = {
-  .name = "STEPPER",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
@@ -98,7 +100,7 @@ const osThreadAttr_t K230_RX_attributes = {
 osThreadId_t INPUT_EVTHandle;
 const osThreadAttr_t INPUT_EVT_attributes = {
   .name = "INPUT_EVT",
-  .stack_size = 256 * 4,
+  .stack_size = 192 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for OLED */
@@ -107,6 +109,13 @@ const osThreadAttr_t OLED_attributes = {
   .name = "OLED",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for IR_REMOTE */
+osThreadId_t IR_REMOTEHandle;
+const osThreadAttr_t IR_REMOTE_attributes = {
+  .name = "IR_REMOTE",
+  .stack_size = 192 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
 /* USER CODE END PV */
@@ -124,10 +133,10 @@ static void MX_TIM8_Init(void);
 static void MX_TIM4_Init(void);
 void StartAppCtrlTask(void *argument);
 void StartDcMotorTask(void *argument);
-void StartStepperTask(void *argument);
 void StartK230RxTask(void *argument);
 void StartInputEvtTask(void *argument);
 void StartOledTask(void *argument);
+void StartInfraredTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -136,342 +145,7 @@ void StartOledTask(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#if 0 /* 旧版业务实现已迁移至 Core/Src 对应模块，保留一版便于本次结构迁移审阅。 */
-
-static uint16_t Servo_ClampPulse(uint8_t index, uint16_t pulse_us)
-{
-  AppConfig config;
-  AppConfig_GetSnapshot(&config);
-  if (index >= 2U)
-  {
-    return 0U;
-  }
-  if (pulse_us < config.servo_min_us[index])
-  {
-    return config.servo_min_us[index];
-  }
-  if (pulse_us > config.servo_max_us[index])
-  {
-    return config.servo_max_us[index];
-  }
-  return pulse_us;
-}
-
-static void Servo_SetPulseUsByIndex(uint8_t index, uint16_t pulse_us)
-{
-  uint32_t channel;
-  if (index >= 2U)
-  {
-    return;
-  }
-  pulse_us = Servo_ClampPulse(index, pulse_us);
-  channel = (index == 0U) ? TIM_CHANNEL_1 : TIM_CHANNEL_2;
-  __HAL_TIM_SET_COMPARE(&htim2, channel, pulse_us);
-  g_servo_pulse_us[index] = pulse_us;
-}
-
-static void Servo_SetAngle(uint8_t index, uint16_t angle)
-{
-  AppConfig config;
-  uint32_t pulse;
-  AppConfig_GetSnapshot(&config);
-  if (index >= 2U)
-  {
-    return;
-  }
-  if (angle > 270U)
-  {
-    angle = 270U;
-  }
-  pulse = config.servo_min_us[index] +
-          ((uint32_t)(config.servo_max_us[index] - config.servo_min_us[index]) * angle) / 270U;
-  Servo_SetPulseUsByIndex(index, (uint16_t)pulse);
-  g_servo_angle[index] = angle;
-}
-
-static void Uart2_StartReceive(void)
-{
-  memset(g_uart2_rx_dma, 0, sizeof(g_uart2_rx_dma));
-  if (huart2.hdmarx != NULL)
-  {
-    __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
-  }
-  (void)HAL_UARTEx_ReceiveToIdle_DMA(&huart2, g_uart2_rx_dma, sizeof(g_uart2_rx_dma));
-}
-
-static void Uart2_SendText(const char *text)
-{
-  size_t length = strlen(text);
-  if (length >= sizeof(g_uart2_tx_buffer))
-  {
-    length = sizeof(g_uart2_tx_buffer) - 1U;
-  }
-  while (g_uart2_tx_busy)
-  {
-    osDelay(1U);
-  }
-  memcpy(g_uart2_tx_buffer, text, length);
-  g_uart2_tx_buffer[length] = '\0';
-  g_uart2_tx_busy = 1U;
-  if (HAL_UART_Transmit_DMA(&huart2, g_uart2_tx_buffer, (uint16_t)length) != HAL_OK)
-  {
-    g_uart2_tx_busy = 0U;
-  }
-}
-
-static void DcMotorTest_SelectNextGear(void)
-{
-  AppConfig config;
-  AppState state;
-  char response[UART2_TX_BUFFER_SIZE];
-
-  AppConfig_GetSnapshot(&config);
-  AppState_GetSnapshot(&state);
-  if (state.estop_active)
-  {
-    Uart2_SendText("DC TEST BLOCKED: ESTOP\r\n");
-    return;
-  }
-
-  if ((g_dc_test_pwm + config.motor_test_pwm_step) > config.motor_test_pwm_limit)
-  {
-    g_dc_test_pwm = 0U;
-  }
-  else
-  {
-    g_dc_test_pwm += config.motor_test_pwm_step;
-  }
-  AppState_SetRunEnabled(g_dc_test_pwm > 0U);
-  AppState_SetDcTestState((uint8_t)((g_dc_test_pwm + config.motor_test_pwm_step - 1U) /
-                                    config.motor_test_pwm_step),
-                          g_dc_test_direction_reverse, g_dc_test_pwm);
-  (void)snprintf(response, sizeof(response),
-                 "DC M1 GEAR=%u PWM=%u DIR=%s\r\n",
-                 (unsigned)((g_dc_test_pwm + config.motor_test_pwm_step - 1U) /
-                            config.motor_test_pwm_step),
-                 (unsigned)g_dc_test_pwm,
-                 g_dc_test_direction_reverse ? "REV" : "FWD");
-  Uart2_SendText(response);
-}
-
-static void DcMotorTest_ToggleDirection(void)
-{
-  AppConfig config;
-  char response[UART2_TX_BUFFER_SIZE];
-
-  AppConfig_GetSnapshot(&config);
-  g_dc_test_direction_reverse ^= 1U;
-  AppState_SetDcTestState((uint8_t)((g_dc_test_pwm + config.motor_test_pwm_step - 1U) /
-                                    config.motor_test_pwm_step),
-                          g_dc_test_direction_reverse, g_dc_test_pwm);
-  (void)snprintf(response, sizeof(response), "DC M1 DIR=%s\r\n",
-                 g_dc_test_direction_reverse ? "REV" : "FWD");
-  Uart2_SendText(response);
-}
-
-static void DcPid_AdjustTarget(int16_t delta_rpm)
-{
-  AppConfig config;
-  char response[UART2_TX_BUFFER_SIZE];
-  int32_t target;
-
-  AppConfig_GetSnapshot(&config);
-  target = (int32_t)g_dc_target_rpm + delta_rpm;
-  if (target > (int32_t)config.maximum_rpm)
-  {
-    target = (int32_t)config.maximum_rpm;
-  }
-  else if (target < -(int32_t)config.maximum_rpm)
-  {
-    target = -(int32_t)config.maximum_rpm;
-  }
-  g_dc_target_rpm = (int16_t)target;
-  (void)snprintf(response, sizeof(response), "PID TARGET=%d RPM\r\n",
-                 (int)g_dc_target_rpm);
-  Uart2_SendText(response);
-}
-
-static uint8_t Uart2_ParseValue(const char *text, long *value)
-{
-  char *end;
-  while ((*text == ' ') || (*text == '='))
-  {
-    ++text;
-  }
-  *value = strtol(text, &end, 10);
-  return (end != text) && ((*end == '\0') || (*end == '\r') || (*end == '\n'));
-}
-
-static void Uart2_ProcessCommand(char *command)
-{
-  char response[UART2_TX_BUFFER_SIZE];
-  long value;
-  uint8_t index;
-
-  while ((*command == ' ') || (*command == '\t'))
-  {
-    ++command;
-  }
-  for (char *cursor = command; *cursor != '\0'; ++cursor)
-  {
-    if ((*cursor == '\r') || (*cursor == '\n'))
-    {
-      *cursor = '\0';
-      break;
-    }
-  }
-
-  if (strcmp(command, "PING") == 0)
-  {
-    Uart2_SendText("PONG\r\n");
-    return;
-  }
-  if (strcmp(command, "HELP") == 0)
-  {
-    Uart2_SendText("PING | GET | S1/S2 <us> | A1/A2 <deg 0..270> | ALL <us> | ALLA <deg>\r\n");
-    return;
-  }
-  if (strcmp(command, "GET") == 0)
-  {
-    (void)snprintf(response, sizeof(response), "S1=%u S2=%u\r\n",
-                   (unsigned)g_servo_pulse_us[0], (unsigned)g_servo_pulse_us[1]);
-    Uart2_SendText(response);
-    return;
-  }
-  if (strncmp(command, "ALLA", 4) == 0)
-  {
-    if (Uart2_ParseValue(command + 4, &value) && (value >= 0L) && (value <= 270L))
-    {
-      Servo_SetAngle(0U, (uint16_t)value);
-      Servo_SetAngle(1U, (uint16_t)value);
-      (void)snprintf(response, sizeof(response), "OK ALLA=%ld\r\n", value);
-    }
-    else
-    {
-      (void)snprintf(response, sizeof(response), "ERR angle 0..270\r\n");
-    }
-    Uart2_SendText(response);
-    return;
-  }
-  if (strncmp(command, "ALL", 3) == 0)
-  {
-    if (Uart2_ParseValue(command + 3, &value) && (value >= 0L) && (value <= 2500L))
-    {
-      Servo_SetPulseUsByIndex(0U, (uint16_t)value);
-      Servo_SetPulseUsByIndex(1U, (uint16_t)value);
-      (void)snprintf(response, sizeof(response), "OK ALL=%u\r\n",
-                     (unsigned)g_servo_pulse_us[0]);
-    }
-    else
-    {
-      (void)snprintf(response, sizeof(response), "ERR pulse\r\n");
-    }
-    Uart2_SendText(response);
-    return;
-  }
-  if ((command[0] == 'S') || (command[0] == 'A'))
-  {
-    if ((command[1] == '1') || (command[1] == '2'))
-    {
-      index = (uint8_t)(command[1] - '1');
-      if (Uart2_ParseValue(command + 2, &value) &&
-           ((command[0] == 'A' && value >= 0L && value <= 270L) ||
-           (command[0] == 'S' && value >= 0L && value <= 2500L)))
-      {
-        if (command[0] == 'A')
-        {
-          Servo_SetAngle(index, (uint16_t)value);
-        }
-        else
-        {
-          Servo_SetPulseUsByIndex(index, (uint16_t)value);
-        }
-        (void)snprintf(response, sizeof(response), "OK %c%u=%u\r\n", command[0],
-                       (unsigned)(index + 1U), (unsigned)g_servo_pulse_us[index]);
-      }
-      else
-      {
-        (void)snprintf(response, sizeof(response), "ERR value\r\n");
-      }
-      Uart2_SendText(response);
-      return;
-    }
-  }
-  Uart2_SendText("ERR unknown command, send HELP\r\n");
-}
-
-static void StepMotor_SetEnabled(uint8_t enabled)
-{
-  /* TB6600 的 ENA 为低电平有效，逻辑层使用 enabled=1 表示使能。 */
-  HAL_GPIO_WritePin(STEP_Z_ENA_GPIO_Port, STEP_Z_ENA_Pin, enabled ? MOTOR_ENABLE_STATE : MOTOR_DISABLE_STATE);
-}
-
-static void StepMotor_ApplyRunState(void)
-{
-  /* 同时控制驱动器使能和脉冲占空比，停止时不继续发步进脉冲。 */
-  StepMotor_SetEnabled(g_motor_run);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, g_motor_run ? STEP_MOTOR_RUN_PULSE : STEP_MOTOR_STOP_PULSE);
-  AppState_SetStepperTelemetry(g_motor_run,
-                               HAL_GPIO_ReadPin(STEP_Z_DIR_GPIO_Port, STEP_Z_DIR_Pin) == GPIO_PIN_SET,
-                               g_motor_run ? STEP_MOTOR_RUN_PULSE : STEP_MOTOR_STOP_PULSE);
-}
-
-static void Led_ApplyRunState(void)
-{
-  if (g_motor_run)
-  {
-    HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);  /* 绿灯亮 */
-    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);          /* 红灯灭 */
-  }
-  else
-  {
-    HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_SET);    /* 绿灯灭 */
-    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);        /* 红灯亮 */
-  }
-}
-
-static void Motor_ToggleRunState(void)
-{
-  AppState state;
-  AppState_GetSnapshot(&state);
-  if (state.estop_active)
-  {
-    return;
-  }
-  g_motor_run = !g_motor_run;
-  AppState_SetRunEnabled(g_motor_run);
-  StepMotor_ApplyRunState();
-  Led_ApplyRunState();
-}
-
-static uint8_t Key_IsPressed(GPIO_TypeDef *port, uint16_t pin)
-{
-  return HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET;
-}
-
-static uint8_t Key0_IsPressed(void)
-{
-  return Key_IsPressed(KEY_RUN_STOP_GPIO_Port, KEY_RUN_STOP_Pin);
-}
-
-static uint8_t Key1_IsPressed(void)
-{
-  return Key_IsPressed(KEY_DIR_TOGGLE_GPIO_Port, KEY_DIR_TOGGLE_Pin);
-}
-
-static void Motor_ToggleDirection(void)
-{
-  /* TB6600 要求 DIR 在脉冲间保持稳定，换向前先暂停当前脉冲。 */
-  if (g_motor_run)
-  {
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, STEP_MOTOR_STOP_PULSE);
-    osDelay(2U);
-  }
-  HAL_GPIO_TogglePin(STEP_Z_DIR_GPIO_Port, STEP_Z_DIR_Pin);
-  StepMotor_ApplyRunState();
-}
-
-#endif
+/* 业务逻辑位于 Core/Src 独立模块，main.c 仅保留硬件初始化与任务入口。 */
 
 /* USER CODE END 0 */
 
@@ -517,17 +191,31 @@ int main(void)
   AppState_Init();
   Encoder_Init();
   SafetyManager_Init();
+  PhotoSensor_Init();
+  Buzzer_Init();
   ServoControl_Init(&htim2);
   StepperAxis_Init(&htim1);
   ChassisMotion_Init();
+  OdometryCalibration_Init();
   RobotController_Init();
+  BoxCalibration_Init();
+  ZCalibration_Init();
+  InitializationDebug_Init();
+  DropDemo_Init();
+  VisionRouteDemo_Init();
   if (InfraredRemote_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
   }
+  /* TIM4捕获ISR不调用RTOS API，可在运行期高于编码器/光电门EXTI。
+   * 保留IOC优先级5以满足CubeMX检查，此USER CODE覆盖可跨代码生成保留。 */
+  HAL_NVIC_SetPriority(TIM4_IRQn, 4U, 0U);
+  if (HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  CameraTilt_Init(&htim4);
 
-  AppConfig config;
-  AppConfig_GetSnapshot(&config);
   if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
@@ -536,8 +224,8 @@ int main(void)
   {
     Error_Handler();
   }
-  ServoControl_SetAngle(0U, 90U);
-  ServoControl_SetPulseUs(1U, config.servo_min_us[1]);
+  ServoControl_ResetToInitial(0U);
+  ServoControl_ResetToInitial(1U);
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -548,6 +236,8 @@ int main(void)
     Error_Handler();
   }
   StepperAxis_StopAll();
+  /* StopAll用于清理PWM状态；随后恢复Z轴静态保持，防止夹爪下滑。 */
+  StepperAxis_SetHoldWhenStopped(STEPPER_AXIS_Z, 1U);
 
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -620,9 +310,6 @@ int main(void)
   /* creation of DC_MOTOR */
   DC_MOTORHandle = osThreadNew(StartDcMotorTask, NULL, &DC_MOTOR_attributes);
 
-  /* creation of STEPPER */
-  STEPPERHandle = osThreadNew(StartStepperTask, NULL, &STEPPER_attributes);
-
   /* creation of K230_RX */
   K230_RXHandle = osThreadNew(StartK230RxTask, NULL, &K230_RX_attributes);
 
@@ -632,8 +319,16 @@ int main(void)
   /* creation of OLED */
   OLEDHandle = osThreadNew(StartOledTask, NULL, &OLED_attributes);
 
+  /* creation of IR_REMOTE */
+  IR_REMOTEHandle = osThreadNew(StartInfraredTask, NULL, &IR_REMOTE_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  if ((APP_CTRLHandle == NULL) || (DC_MOTORHandle == NULL) ||
+      (K230_RXHandle == NULL) || (INPUT_EVTHandle == NULL) ||
+      (OLEDHandle == NULL) || (IR_REMOTEHandle == NULL))
+  {
+    Error_Handler();
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -753,7 +448,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 71;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 499;
+  htim1.Init.Period = 399;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
@@ -956,6 +651,7 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
 
@@ -965,9 +661,18 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 71;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 65535;
+  htim4.Init.Period = 19999;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_IC_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
@@ -1145,23 +850,20 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, LED_STATUS_Pin|BEEP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, DC_M1_UNUSED_1_Pin|DC_M1_UNUSED_2_Pin|DC_M2_UNUSED_1_Pin|DC_M2_UNUSED_2_Pin
                           |DC_M3_UNUSED_1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, STEP_X_ENA_Pin|STEP_Z_ENA_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(STEP_X_ENA_GPIO_Port, STEP_X_ENA_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, STEP_X_DIR_Pin|STEP_Z_DIR_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, STEP_Z_ENA_Pin|STEP_X_DIR_Pin|STEP_Z_DIR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : LIMIT_Z_MAX_Pin LIMIT_X_MIN_Pin LIMIT_X_MAX_Pin */
   GPIO_InitStruct.Pin = LIMIT_Z_MAX_Pin|LIMIT_X_MIN_Pin|LIMIT_X_MAX_Pin;
@@ -1175,12 +877,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LED_STATUS_Pin */
-  GPIO_InitStruct.Pin = LED_STATUS_Pin;
+  /*Configure GPIO pins : LED_STATUS_Pin BEEP_Pin */
+  GPIO_InitStruct.Pin = LED_STATUS_Pin|BEEP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_STATUS_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : DC_M1_UNUSED_1_Pin DC_M1_UNUSED_2_Pin DC_M2_UNUSED_1_Pin DC_M2_UNUSED_2_Pin
                            DC_M3_UNUSED_1_Pin */
@@ -1196,6 +898,18 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(LIMIT_Z_MIN_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PHOTO_SENSOR_1_Pin PHOTO_SENSOR_2_Pin */
+  GPIO_InitStruct.Pin = PHOTO_SENSOR_1_Pin|PHOTO_SENSOR_2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PHOTO_SENSOR_3_Pin */
+  GPIO_InitStruct.Pin = PHOTO_SENSOR_3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(PHOTO_SENSOR_3_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : ENC_M1_A_Pin ENC_M2_A_Pin ENC_M3_A_Pin ENC_M4_A_Pin */
   GPIO_InitStruct.Pin = ENC_M1_A_Pin|ENC_M2_A_Pin|ENC_M3_A_Pin|ENC_M4_A_Pin;
@@ -1230,12 +944,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_RED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : BEEP_Pin */
-  GPIO_InitStruct.Pin = BEEP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  /*Configure GPIO pin : CAMERA_TILT_PWM_Pin */
+  GPIO_InitStruct.Pin = CAMERA_TILT_PWM_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(BEEP_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(CAMERA_TILT_PWM_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
@@ -1278,6 +991,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     SafetyManager_TriggerEstop();
     InputManager_HandleExti(GPIO_Pin);
   }
+  else if ((GPIO_Pin == PHOTO_SENSOR_1_Pin) ||
+           (GPIO_Pin == PHOTO_SENSOR_2_Pin) ||
+           (GPIO_Pin == PHOTO_SENSOR_3_Pin))
+  {
+    PhotoSensor_HandleExti(GPIO_Pin);
+  }
   else
   {
     SafetyManager_HandleExti(GPIO_Pin);
@@ -1305,6 +1024,11 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   InfraredRemote_HandleCapture(htim);
 }
 
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
+{
+  StepperAxis_HandlePulseFinished(htim);
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartAppCtrlTask */
@@ -1317,11 +1041,17 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 void StartAppCtrlTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
+  uint32_t next_tick = osKernelGetTickCount();
   for(;;)
   {
-    InfraredRemote_Process();
     RobotController_Update();
-    osDelay(10U);
+    OdometryCalibration_Process();
+    InitializationDebug_Process();
+    DropDemo_Process();
+    VisionRouteDemo_Process();
+    StepperAxis_UpdateTelemetry();
+    next_tick += 10U;
+    osDelayUntil(next_tick);
   }
   /* USER CODE END 5 */
 }
@@ -1336,37 +1066,21 @@ void StartAppCtrlTask(void *argument)
 void StartDcMotorTask(void *argument)
 {
   /* USER CODE BEGIN StartDcMotorTask */
+  uint32_t next_tick = osKernelGetTickCount();
   for (;;)
   {
     AppConfig config;
     AppConfig_GetSnapshot(&config);
     ChassisMotion_TaskStep();
-    osDelay(config.motor_control_period_ms);
+    next_tick += config.motor_control_period_ms;
+    osDelayUntil(next_tick);
   }
   /* USER CODE END StartDcMotorTask */
 }
 
-/* USER CODE BEGIN Header_StartStepperTask */
-/**
-  * @brief  Stepper axis control task.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartStepperTask */
-void StartStepperTask(void *argument)
-{
-  /* USER CODE BEGIN StartStepperTask */
-  for (;;)
-  {
-    StepperAxis_UpdateTelemetry();
-    osDelay(20);
-  }
-  /* USER CODE END StartStepperTask */
-}
-
 /* USER CODE BEGIN Header_StartK230RxTask */
 /**
-  * @brief  K230 UART receive/parse task.
+  * @brief  K230 binary protocol receive, parse, and request task.
   * @param  argument: Not used
   * @retval None
   */
@@ -1403,18 +1117,43 @@ void StartOledTask(void *argument)
 {
   /* USER CODE BEGIN StartOledTask */
   AppConfig config;
+  uint32_t next_tick;
 
   osDelay(20);
   UiManager_Init(&hi2c1);
+  next_tick = osKernelGetTickCount();
 
   for (;;)
   {
     /* 显示任务只负责刷新 UI，不直接驱动舵机或电机。 */
     AppConfig_GetSnapshot(&config);
     UiManager_Render();
-    osDelay(config.ui_refresh_period_ms);
+    next_tick += config.ui_refresh_period_ms;
+    osDelayUntil(next_tick);
   }
   /* USER CODE END StartOledTask */
+}
+
+/* USER CODE BEGIN Header_StartInfraredTask */
+/**
+  * @brief  NEC infrared command dispatch task.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartInfraredTask */
+void StartInfraredTask(void *argument)
+{
+  /* USER CODE BEGIN StartInfraredTask */
+  uint32_t next_tick = osKernelGetTickCount();
+  for (;;)
+  {
+    /* 所有通过 NEC 校验的按键码均由此处取走并统一分发。 */
+    InfraredRemote_Process();
+    Buzzer_Process();
+    next_tick += 10U;
+    osDelayUntil(next_tick);
+  }
+  /* USER CODE END StartInfraredTask */
 }
 
 /**
