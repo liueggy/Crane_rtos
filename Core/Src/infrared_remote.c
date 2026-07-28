@@ -1,14 +1,20 @@
 #include "infrared_remote.h"
 
 #include "main.h"
+#include "box_calibration.h"
 #include "buzzer.h"
 #include "chassis_motion.h"
+#include "drop_demo.h"
+#include "initialization_debug.h"
 #include "k230_link.h"
+#include "odometry_calibration.h"
 #include "photo_sensor.h"
 #include "safety_manager.h"
 #include "servo_control.h"
 #include "stepper_axis.h"
 #include "ui_manager.h"
+#include "z_calibration.h"
+#include "vision_route_demo.h"
 
 /* TIM4 的 1 MHz 计数单位为微秒。以下窗口保留了接收头误差余量。 */
 #define IR_LEADER_MARK_MIN_US 8000U
@@ -22,6 +28,7 @@
 #define IR_BIT_ONE_SPACE_MIN_US 1300U
 #define IR_BIT_ONE_SPACE_MAX_US 2100U
 #define IR_FRAME_BITS 32U
+#define IR_FRAME_TIMEOUT_MS 30U
 #define IR_X_DIRECTION_CHANGE_DELAY_MS 300U
 #define IR_KEY_BEEP_DURATION_MS 60U
 
@@ -38,6 +45,7 @@ static volatile uint16_t g_last_capture;
 static volatile uint32_t g_frame;
 static volatile uint8_t g_bit_index;
 static volatile uint8_t g_capture_started;
+static volatile uint32_t g_last_edge_tick;
 static volatile InfraredRemoteDecodeState g_decode_state;
 static volatile uint8_t g_pending_command;
 static volatile uint8_t g_command_ready;
@@ -167,9 +175,24 @@ static void InfraredRemote_StopSelectedTarget(void)
 
 void InfraredRemote_SyncToCurrentPage(void)
 {
+  if ((UiManager_GetPage() != UI_PAGE_DROP_DEMO) &&
+      (DropDemo_GetState() != DROP_DEMO_IDLE)) DropDemo_Abort();
+  if ((UiManager_GetPage() != UI_PAGE_INITIALIZATION_DEBUG) &&
+      (InitializationDebug_GetState() != INITIALIZATION_DEBUG_IDLE))
+    InitializationDebug_Abort();
+  if ((UiManager_GetPage() != UI_PAGE_ODOMETRY_CALIBRATION) &&
+      OdometryCalibration_IsRunning()) OdometryCalibration_Abort();
+  if ((UiManager_GetPage() != UI_PAGE_VISION) &&
+      (VisionRouteDemo_GetState() != VISION_ROUTE_DEMO_IDLE))
+    VisionRouteDemo_Abort();
   switch (UiManager_GetPage())
   {
     case UI_PAGE_MOTOR_SPEED:
+      InfraredRemote_SelectTarget(IR_CONTROL_TARGET_CHASSIS);
+      break;
+
+    case UI_PAGE_ODOMETRY_CALIBRATION:
+      InfraredRemote_StopSelectedTarget();
       InfraredRemote_SelectTarget(IR_CONTROL_TARGET_CHASSIS);
       break;
 
@@ -188,6 +211,26 @@ void InfraredRemote_SyncToCurrentPage(void)
       InfraredRemote_SelectTarget(
           (g_selected_axis == IR_CONTROL_AXIS_X) ?
           IR_CONTROL_TARGET_X : IR_CONTROL_TARGET_Z);
+      break;
+
+    case UI_PAGE_BOX_CALIBRATION:
+      InfraredRemote_StopSelectedTarget();
+      InfraredRemote_SelectAxis(IR_CONTROL_AXIS_X);
+      g_selected_target = IR_CONTROL_TARGET_X;
+      break;
+
+    case UI_PAGE_Z_CALIBRATION:
+      InfraredRemote_StopSelectedTarget();
+      InfraredRemote_SelectAxis(IR_CONTROL_AXIS_Z);
+      g_selected_target = IR_CONTROL_TARGET_Z;
+      break;
+
+    case UI_PAGE_INITIALIZATION_DEBUG:
+      InfraredRemote_StopSelectedTarget();
+      break;
+
+    case UI_PAGE_DROP_DEMO:
+      InfraredRemote_StopSelectedTarget();
       break;
 
     case UI_PAGE_SERVO:
@@ -249,6 +292,7 @@ HAL_StatusTypeDef InfraredRemote_Init(TIM_HandleTypeDef *htim)
   g_frame = 0U;
   g_bit_index = 0U;
   g_capture_started = 0U;
+  g_last_edge_tick = HAL_GetTick();
   g_decode_state = IR_WAIT_LEADER_MARK;
   g_pending_command = 0U;
   g_command_ready = 0U;
@@ -283,6 +327,7 @@ void InfraredRemote_HandleCapture(TIM_HandleTypeDef *htim)
   }
 
   capture = (uint16_t)HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_4);
+  g_last_edge_tick = HAL_GetTick();
   if (g_capture_started == 0U)
   {
     g_last_capture = capture;
@@ -384,9 +429,22 @@ void InfraredRemote_Process(void)
   uint32_t primask;
   UiPage page;
 
+  /* 丢边沿会破坏软件交替捕获的极性；空闲超时后强制回到下降沿起始态。 */
+  if ((g_capture_started != 0U) &&
+      ((uint32_t)(HAL_GetTick() - g_last_edge_tick) > IR_FRAME_TIMEOUT_MS))
+  {
+    uint32_t reset_primask = __get_PRIMASK();
+    __disable_irq();
+    g_capture_started = 0U;
+    InfraredRemote_ResetFrame();
+    __HAL_TIM_SET_CAPTUREPOLARITY(g_ir_timer, TIM_CHANNEL_4,
+                                  TIM_INPUTCHANNELPOLARITY_FALLING);
+    __set_PRIMASK(reset_primask);
+  }
+
   /* PB11由X/Z轴共用：记录触发方向，停机后只允许反向脱离。 */
   StepperAxis_ProcessPhotoInterlock();
-  if (PhotoSensor_GetState(0U) != 0U)
+  if (PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) != 0U)
   {
     for (uint8_t axis = 0U; axis < IR_CONTROL_AXIS_COUNT; ++axis)
     {
@@ -437,12 +495,24 @@ void InfraredRemote_Process(void)
   /* 页面浏览不产生运动，即使故障锁定也允许查看诊断信息。 */
   if (command == IR_REMOTE_CMD_VOL_MINUS)
   {
+    if (UiManager_GetPage() == UI_PAGE_DROP_DEMO) DropDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_INITIALIZATION_DEBUG)
+      InitializationDebug_Abort();
+    if (UiManager_GetPage() == UI_PAGE_ODOMETRY_CALIBRATION)
+      OdometryCalibration_Abort();
+    if (UiManager_GetPage() == UI_PAGE_VISION) VisionRouteDemo_Abort();
     UiManager_PreviousPage();
     InfraredRemote_SyncToCurrentPage();
     return;
   }
   if (command == IR_REMOTE_CMD_VOL_PLUS)
   {
+    if (UiManager_GetPage() == UI_PAGE_DROP_DEMO) DropDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_INITIALIZATION_DEBUG)
+      InitializationDebug_Abort();
+    if (UiManager_GetPage() == UI_PAGE_ODOMETRY_CALIBRATION)
+      OdometryCalibration_Abort();
+    if (UiManager_GetPage() == UI_PAGE_VISION) VisionRouteDemo_Abort();
     UiManager_NextPage();
     InfraredRemote_SyncToCurrentPage();
     return;
@@ -452,6 +522,94 @@ void InfraredRemote_Process(void)
 
   /* 故障状态只确认收到按键，不执行任何电机动作。 */
   if (safety_fault != 0U) return;
+
+  if (page == UI_PAGE_DROP_DEMO)
+  {
+    if (command == IR_REMOTE_CMD_POWER) DropDemo_ToggleRunning();
+    else if (command == IR_REMOTE_CMD_0) DropDemo_Abort();
+    return;
+  }
+
+  if (page == UI_PAGE_INITIALIZATION_DEBUG)
+  {
+    if (command == IR_REMOTE_CMD_POWER) InitializationDebug_ToggleRunning();
+    else if (command == IR_REMOTE_CMD_0) InitializationDebug_Abort();
+    return;
+  }
+
+  if (page == UI_PAGE_ODOMETRY_CALIBRATION)
+  {
+    int8_t digit = InfraredRemote_DigitValue(command);
+    if (digit >= 0)
+      OdometryCalibration_AppendDigit((uint8_t)digit);
+    else if (command == IR_REMOTE_CMD_LEFT)
+      OdometryCalibration_SelectField(ODOMETRY_FIELD_DISTANCE);
+    else if (command == IR_REMOTE_CMD_RIGHT)
+      OdometryCalibration_SelectField(ODOMETRY_FIELD_SPEED);
+    else if (command == IR_REMOTE_CMD_UP)
+      OdometryCalibration_SetDirection(0U);
+    else if (command == IR_REMOTE_CMD_DOWN)
+      OdometryCalibration_SetDirection(1U);
+    else if (command == IR_REMOTE_CMD_POWER)
+      OdometryCalibration_ToggleRunning();
+    return;
+  }
+
+  /* 视觉页独占自动巡检Demo；运行中不允许方向键落到其他机构。 */
+  if (page == UI_PAGE_VISION)
+  {
+    if (command == IR_REMOTE_CMD_POWER)
+      VisionRouteDemo_ToggleRunning();
+    else if (command == IR_REMOTE_CMD_0)
+      VisionRouteDemo_Abort();
+    else if (!VisionRouteDemo_IsRunning() && (command == IR_REMOTE_CMD_1))
+      (void)K230Link_SelectTask(K230_TASK_NUMBER);
+    else if (!VisionRouteDemo_IsRunning() && (command == IR_REMOTE_CMD_2))
+      (void)K230Link_SelectTask(K230_TASK_BEAN);
+    return;
+  }
+
+  /* 箱位标定页使用有限脉冲点动，所有命令均在本页内消费。 */
+  if (page == UI_PAGE_BOX_CALIBRATION)
+  {
+    int8_t digit = InfraredRemote_DigitValue(command);
+    if ((digit >= 1) && (digit <= 5))
+      BoxCalibration_SelectSlot((uint8_t)(digit - 1));
+    else if (command == IR_REMOTE_CMD_LEFT)
+      (void)BoxCalibration_Jog(1U);
+    else if (command == IR_REMOTE_CMD_RIGHT)
+      (void)BoxCalibration_Jog(0U);
+    else if (command == IR_REMOTE_CMD_UP)
+      BoxCalibration_AdjustStep(1);
+    else if (command == IR_REMOTE_CMD_DOWN)
+      BoxCalibration_AdjustStep(-1);
+    else if (command == IR_REMOTE_CMD_POWER)
+      (void)BoxCalibration_SaveCurrent();
+    else if (command == IR_REMOTE_CMD_0)
+      (void)BoxCalibration_SetXZero();
+    return;
+  }
+
+  /* Z高度标定页：三档夹取高度和一个放豆高度。 */
+  if (page == UI_PAGE_Z_CALIBRATION)
+  {
+    int8_t digit = InfraredRemote_DigitValue(command);
+    if ((digit >= 1) && (digit <= 4))
+      ZCalibration_SelectTarget((uint8_t)(digit - 1));
+    else if (command == IR_REMOTE_CMD_UP)
+      (void)ZCalibration_Jog(1U);
+    else if (command == IR_REMOTE_CMD_DOWN)
+      (void)ZCalibration_Jog(0U);
+    else if (command == IR_REMOTE_CMD_LEFT)
+      ZCalibration_AdjustStep(-1);
+    else if (command == IR_REMOTE_CMD_RIGHT)
+      ZCalibration_AdjustStep(1);
+    else if (command == IR_REMOTE_CMD_POWER)
+      (void)ZCalibration_SaveCurrent();
+    else if (command == IR_REMOTE_CMD_0)
+      (void)ZCalibration_SetBottomReference();
+    return;
+  }
 
   /* 定量页的数字键逐位输入，六位上限可确保OLED整行显示。 */
   if (page == UI_PAGE_STEPPER_PULSE)
@@ -560,21 +718,7 @@ void InfraredRemote_Process(void)
     }
   }
 
-  else if (page == UI_PAGE_VISION)
-  {
-    if (command == IR_REMOTE_CMD_1)
-    {
-      (void)K230Link_SelectTask(K230_TASK_NUMBER);
-      return;
-    }
-    if (command == IR_REMOTE_CMD_2)
-    {
-      (void)K230Link_SelectTask(K230_TASK_BEAN);
-      return;
-    }
-  }
-
-  /* 总览和系统页只用于观察；视觉页仅响应1/2任务选择。 */
+  /* 总览和系统页只用于观察。 */
   if ((page == UI_PAGE_OVERVIEW) || (page == UI_PAGE_VISION) ||
       (page == UI_PAGE_SYSTEM)) return;
 

@@ -24,14 +24,18 @@
 /* USER CODE BEGIN Includes */
 #include "app_config.h"
 #include "app_state.h"
+#include "box_calibration.h"
 #include "chassis_motion.h"
 #include "buzzer.h"
 #include "dc_motor.h"
+#include "drop_demo.h"
 #include "encoder.h"
 #include "input_manager.h"
 #include "infrared_remote.h"
+#include "initialization_debug.h"
 #include "k230_link.h"
 #include "motor_control.h"
+#include "odometry_calibration.h"
 #include "robot_controller.h"
 #include "safety_manager.h"
 #include "servo_control.h"
@@ -39,6 +43,8 @@
 #include "photo_sensor.h"
 #include "stepper_axis.h"
 #include "ui_manager.h"
+#include "z_calibration.h"
+#include "vision_route_demo.h"
 
 /* USER CODE END Includes */
 
@@ -190,11 +196,20 @@ int main(void)
   ServoControl_Init(&htim2);
   StepperAxis_Init(&htim1);
   ChassisMotion_Init();
+  OdometryCalibration_Init();
   RobotController_Init();
+  BoxCalibration_Init();
+  ZCalibration_Init();
+  InitializationDebug_Init();
+  DropDemo_Init();
+  VisionRouteDemo_Init();
   if (InfraredRemote_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
   }
+  /* TIM4捕获ISR不调用RTOS API，可在运行期高于编码器/光电门EXTI。
+   * 保留IOC优先级5以满足CubeMX检查，此USER CODE覆盖可跨代码生成保留。 */
+  HAL_NVIC_SetPriority(TIM4_IRQn, 4U, 0U);
   if (HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -221,6 +236,8 @@ int main(void)
     Error_Handler();
   }
   StepperAxis_StopAll();
+  /* StopAll用于清理PWM状态；随后恢复Z轴静态保持，防止夹爪下滑。 */
+  StepperAxis_SetHoldWhenStopped(STEPPER_AXIS_Z, 1U);
 
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -636,7 +653,6 @@ static void MX_TIM4_Init(void)
 
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
 
   /* USER CODE BEGIN TIM4_Init 1 */
@@ -661,10 +677,6 @@ static void MX_TIM4_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
-  {
-    Error_Handler();
-  }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
@@ -679,14 +691,6 @@ static void MX_TIM4_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1700;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
   /* USER CODE BEGIN TIM4_Init 2 */
   /* TIM4 是通用定时器，不支持 BOTHEDGE 硬件捕获。
    * 初始化为下降沿捕获（9ms 引导码起始沿），
@@ -694,7 +698,6 @@ static void MX_TIM4_Init(void)
   __HAL_TIM_SET_CAPTUREPOLARITY(&htim4, TIM_CHANNEL_4, TIM_INPUTCHANNELPOLARITY_FALLING);
 
   /* USER CODE END TIM4_Init 2 */
-  HAL_TIM_MspPostInit(&htim4);
 
 }
 
@@ -847,23 +850,20 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, LED_STATUS_Pin|BEEP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, DC_M1_UNUSED_1_Pin|DC_M1_UNUSED_2_Pin|DC_M2_UNUSED_1_Pin|DC_M2_UNUSED_2_Pin
                           |DC_M3_UNUSED_1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, STEP_X_ENA_Pin|STEP_Z_ENA_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(STEP_X_ENA_GPIO_Port, STEP_X_ENA_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, STEP_X_DIR_Pin|STEP_Z_DIR_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, STEP_Z_ENA_Pin|STEP_X_DIR_Pin|STEP_Z_DIR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : LIMIT_Z_MAX_Pin LIMIT_X_MIN_Pin LIMIT_X_MAX_Pin */
   GPIO_InitStruct.Pin = LIMIT_Z_MAX_Pin|LIMIT_X_MIN_Pin|LIMIT_X_MAX_Pin;
@@ -877,18 +877,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PHOTO_SENSOR_3_Pin */
-  GPIO_InitStruct.Pin = PHOTO_SENSOR_3_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(PHOTO_SENSOR_3_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LED_STATUS_Pin */
-  GPIO_InitStruct.Pin = LED_STATUS_Pin;
+  /*Configure GPIO pins : LED_STATUS_Pin BEEP_Pin */
+  GPIO_InitStruct.Pin = LED_STATUS_Pin|BEEP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_STATUS_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : DC_M1_UNUSED_1_Pin DC_M1_UNUSED_2_Pin DC_M2_UNUSED_1_Pin DC_M2_UNUSED_2_Pin
                            DC_M3_UNUSED_1_Pin */
@@ -904,6 +898,18 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(LIMIT_Z_MIN_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PHOTO_SENSOR_1_Pin PHOTO_SENSOR_2_Pin */
+  GPIO_InitStruct.Pin = PHOTO_SENSOR_1_Pin|PHOTO_SENSOR_2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PHOTO_SENSOR_3_Pin */
+  GPIO_InitStruct.Pin = PHOTO_SENSOR_3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(PHOTO_SENSOR_3_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : ENC_M1_A_Pin ENC_M2_A_Pin ENC_M3_A_Pin ENC_M4_A_Pin */
   GPIO_InitStruct.Pin = ENC_M1_A_Pin|ENC_M2_A_Pin|ENC_M3_A_Pin|ENC_M4_A_Pin;
@@ -938,18 +944,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_RED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : BEEP_Pin */
-  GPIO_InitStruct.Pin = BEEP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  /*Configure GPIO pin : CAMERA_TILT_PWM_Pin */
+  GPIO_InitStruct.Pin = CAMERA_TILT_PWM_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(BEEP_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PHOTO_SENSOR_1_Pin PHOTO_SENSOR_2_Pin */
-  GPIO_InitStruct.Pin = PHOTO_SENSOR_1_Pin|PHOTO_SENSOR_2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(CAMERA_TILT_PWM_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
@@ -1046,6 +1045,10 @@ void StartAppCtrlTask(void *argument)
   for(;;)
   {
     RobotController_Update();
+    OdometryCalibration_Process();
+    InitializationDebug_Process();
+    DropDemo_Process();
+    VisionRouteDemo_Process();
     StepperAxis_UpdateTelemetry();
     next_tick += 10U;
     osDelayUntil(next_tick);

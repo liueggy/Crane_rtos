@@ -41,7 +41,10 @@ static uint32_t AxisMaximumMovePulses(StepperAxisId axis)
 
 static uint8_t CanStart(StepperAxisId axis)
 {
-  if (PhotoSensor_GetState(0U) == 0U) return 1U;
+  StepperAxisId other = (axis == STEPPER_AXIS_X) ? STEPPER_AXIS_Z : STEPPER_AXIS_X;
+  /* X/Z共用同一个光电门，禁止双轴同时运动导致限位归属不确定。 */
+  if (g_enabled[other]) return 0U;
+  if (PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) == 0U) return 1U;
   return g_photo_limit_valid && (axis == g_photo_limit_axis) &&
          (g_reverse[axis] != g_photo_limit_reverse);
 }
@@ -92,6 +95,10 @@ void StepperAxis_Init(TIM_HandleTypeDef *timer)
     g_position_pulses[axis] = 0;
   }
   StepperAxis_StopAll();
+  /* Z轴承受夹爪重力：初始化后立即使能保持，不输出脉冲。 */
+  g_has_run[STEPPER_AXIS_Z] = 1U;
+  g_holding[STEPPER_AXIS_Z] = 1U;
+  WriteEnable(STEPPER_AXIS_Z, 1U);
 }
 
 void StepperAxis_SetEnabled(StepperAxisId axis, uint8_t enabled)
@@ -195,6 +202,7 @@ void StepperAxis_HandlePulseFinished(TIM_HandleTypeDef *timer)
     return;
 
   if (!g_enabled[axis]) return;
+  /* 统一坐标符号：X正转向左为+X，Z正转向下为+Z。 */
   g_position_pulses[axis] += g_reverse[axis] ? -1 : 1;
   if (!g_pulse_move_active[axis] || (g_remaining_pulses[axis] == 0U)) return;
   --g_remaining_pulses[axis];
@@ -242,6 +250,13 @@ uint8_t StepperAxis_ResetPositionPulses(StepperAxisId axis)
   return 1U;
 }
 
+uint8_t StepperAxis_SetPositionPulses(StepperAxisId axis, int32_t position)
+{
+  if ((axis >= STEPPER_AXIS_COUNT) || g_enabled[axis]) return 0U;
+  g_position_pulses[axis] = position;
+  return 1U;
+}
+
 uint8_t StepperAxis_IsEnabled(StepperAxisId axis)
 {
   return (axis < STEPPER_AXIS_COUNT) ? g_enabled[axis] : 0U;
@@ -258,14 +273,35 @@ void StepperAxis_SetHoldWhenStopped(StepperAxisId axis, uint8_t enabled)
   g_hold_when_stopped[axis] = enabled ? 1U : 0U;
   if (!g_enabled[axis])
   {
-    g_holding[axis] = (g_hold_when_stopped[axis] && g_has_run[axis]) ? 1U : 0U;
+    /* 开启静态保持时立即吸合，不要求该轴已经运行过。 */
+    g_holding[axis] = g_hold_when_stopped[axis] ? 1U : 0U;
+    if (g_holding[axis]) g_has_run[axis] = 1U;
     WriteEnable(axis, g_holding[axis]);
   }
 }
 
+uint8_t StepperAxis_ArmPhotoLimitEscape(StepperAxisId axis,
+                                        uint8_t blocked_direction_reverse)
+{
+  if ((axis >= STEPPER_AXIS_COUNT) ||
+      (PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) == 0U) ||
+      g_enabled[STEPPER_AXIS_X] || g_enabled[STEPPER_AXIS_Z]) return 0U;
+  g_photo_limit_axis = axis;
+  g_photo_limit_reverse = blocked_direction_reverse ? 1U : 0U;
+  g_photo_limit_valid = 1U;
+  return 1U;
+}
+
+uint8_t StepperAxis_IsPhotoLimitOwnedBy(StepperAxisId axis)
+{
+  return (axis < STEPPER_AXIS_COUNT) &&
+         (PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) != 0U) &&
+         g_photo_limit_valid && (g_photo_limit_axis == axis);
+}
+
 void StepperAxis_ProcessPhotoInterlock(void)
 {
-  if (PhotoSensor_GetState(0U) == 0U)
+  if (PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) == 0U)
   {
     g_photo_limit_valid = 0U;
     return;

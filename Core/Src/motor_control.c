@@ -78,6 +78,22 @@ void MotorControl_SetAllTargetRpm(float rpm)
   }
 }
 
+void MotorControl_SetAllTargetRpmCompensated(float rpm)
+{
+  AppConfig config;
+  float direction;
+  AppConfig_GetSnapshot(&config);
+  rpm = ClampFloat(rpm, -config.maximum_rpm, config.maximum_rpm);
+  direction = (rpm > 0.0f) ? 1.0f : ((rpm < 0.0f) ? -1.0f : 0.0f);
+
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    float target = rpm + direction * config.motor_target_trim_rpm[i];
+    g_loops[i].requested_rpm = ClampFloat(target, -config.maximum_rpm,
+                                           config.maximum_rpm);
+  }
+}
+
 void MotorControl_Reset(void)
 {
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
@@ -94,20 +110,30 @@ void MotorControl_Reset(void)
 
 void MotorControl_Update(uint8_t enabled)
 {
+  MotorControl_UpdateMasked(enabled ? 0x0FU : 0U);
+}
+
+void MotorControl_UpdateMasked(uint8_t enabled_mask)
+{
   AppConfig config;
   float average_rpm = 0.0f;
   float dt;
+  uint8_t enabled_count = 0U;
   AppConfig_GetSnapshot(&config);
   dt = (float)config.motor_control_period_ms / 1000.0f;
 
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
   {
     g_loops[i].measured_rpm = UpdateMeasuredRpm(i, &config);
-    average_rpm += g_loops[i].measured_rpm;
+    if (enabled_mask & (uint8_t)(1U << i))
+    {
+      average_rpm += g_loops[i].measured_rpm;
+      ++enabled_count;
+    }
   }
 
   /* 手动停止必须立即撤销桥臂输出，不能继续用残余误差主动制动。 */
-  if (!enabled)
+  if (enabled_mask == 0U)
   {
     for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
     {
@@ -121,16 +147,27 @@ void MotorControl_Update(uint8_t enabled)
     return;
   }
   /* 平均速度用于四轮同步补偿，减少直行时各轮速度偏差。 */
-  average_rpm /= (float)APP_MOTOR_COUNT;
+  average_rpm /= (float)enabled_count;
 
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
   {
+    uint8_t enabled = (enabled_mask & (uint8_t)(1U << i)) ? 1U : 0U;
     float target = enabled ? g_loops[i].requested_rpm : 0.0f;
     float ramp_rate = (target == 0.0f) ? config.deceleration_rpm_s : config.acceleration_rpm_s;
     float error;
     float output;
     int16_t command;
 
+    if (!enabled)
+    {
+      g_loops[i].requested_rpm = 0.0f;
+      g_loops[i].ramped_rpm = 0.0f;
+      g_loops[i].integral = 0.0f;
+      DcMotor_SetCommand(i, 0);
+      AppState_SetMotorTelemetry(i, Encoder_GetCount(i), 0.0f,
+                                 g_loops[i].measured_rpm, 0);
+      continue;
+    }
     /* 先限制目标变化速度，再进入 PI，避免轮子突然启动。 */
     g_loops[i].ramped_rpm = MoveTowards(g_loops[i].ramped_rpm, target, ramp_rate * dt);
     error = g_loops[i].ramped_rpm - g_loops[i].measured_rpm;
@@ -143,10 +180,6 @@ void MotorControl_Update(uint8_t enabled)
     {
       output += (average_rpm - g_loops[i].measured_rpm) * config.speed_sync_kp;
       output += (output > 0.0f) ? (float)config.pwm_deadband : -(float)config.pwm_deadband;
-    }
-    else if (!enabled)
-    {
-      g_loops[i].integral = 0.0f;
     }
     /* 速度环只减小同向驱动力，不允许超调时跨零主动反转。 */
     if (g_loops[i].ramped_rpm > 0.0f)

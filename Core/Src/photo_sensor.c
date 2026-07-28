@@ -42,7 +42,13 @@ void PhotoSensor_HandleExti(uint16_t gpio_pin)
 
 uint8_t PhotoSensor_GetState(uint8_t index)
 {
-  return (index < PHOTO_SENSOR_COUNT) ? g_state[index] : 0U;
+  uint8_t state;
+  if (index >= PHOTO_SENSOR_COUNT) return 0U;
+
+  /* 控制任务直接复核GPIO，避免一次EXTI边沿丢失后缓存状态长期错误。 */
+  state = PhotoSensor_Read(index);
+  g_state[index] = state;
+  return state;
 }
 
 uint8_t PhotoSensor_ConsumeChangedMask(void)

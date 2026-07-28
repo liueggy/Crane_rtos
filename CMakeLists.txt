@@ -83,7 +83,17 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/input_manager.c
     Core/Src/infrared_remote.c
     Core/Src/k230_link.c
+    Core/Src/box_calibration.c
+    Core/Src/z_calibration.c
+    Core/Src/initialization_debug.c
+    Core/Src/odometry_calibration.c
+    Core/Src/drop_demo.c
+    Core/Src/world_map.c
+    Core/Src/vision_survey.c
+    Core/Src/vision_route_demo.c
+    Core/Src/mission_planner.c
     Core/Src/robot_routes.c
+    Core/Src/route_executor.c
     Core/Src/robot_controller.c
 )
 

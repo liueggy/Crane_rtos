@@ -8,10 +8,14 @@ static const AppConfig k_default_config = {
   .speed_kp = {0.80f, 0.80f, 0.80f, 0.80f},
   .speed_ki = {2.50f, 2.50f, 2.50f, 2.50f},
   .speed_feedforward = {0.65f, 0.65f, 0.65f, 0.65f},
+  /* M3/M4线缆较长，实机目标值增加2.5RPM补偿。 */
+  .motor_target_trim_rpm = {0.0f, 0.0f, 2.5f, 2.5f},
   .speed_sync_kp = 0.20f,
   .acceleration_rpm_s = 80.0f,
   .deceleration_rpm_s = 120.0f,
-  .encoder_counts_per_output_rev = 374.0f,
+  /* 1000/2000mm底盘实测反推得到约453~483计数/圈，先取中值复标。 */
+  .encoder_counts_per_output_rev = 468.0f,
+  .wheel_circumference_mm = 263.9f,
   .speed_filter_alpha = 0.25f,
   .maximum_rpm = 130.0f,
   .pwm_max = 99U,
@@ -46,6 +50,7 @@ static uint8_t AppConfig_IsValid(const AppConfig *config)
   /* 先做基础范围检查，避免错误参数直接进入闭环计算。 */
   if ((config == NULL) ||
       (config->encoder_counts_per_output_rev < 1.0f) ||
+      (config->wheel_circumference_mm < 1.0f) ||
       (config->maximum_rpm <= 0.0f) ||
       (config->pwm_max == 0U) || (config->pwm_max > 99U) ||
       (config->motor_control_period_ms < 5U) ||
@@ -66,6 +71,14 @@ static uint8_t AppConfig_IsValid(const AppConfig *config)
          (config->servo_travel_degrees[i] - config->servo_angle_offset_degrees[i])) ||
         (config->servo_initial_degrees[i] < config->servo_command_min_degrees[i]) ||
         (config->servo_initial_degrees[i] > config->servo_command_max_degrees[i]))
+    {
+      return 0U;
+    }
+  }
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    if ((config->motor_target_trim_rpm[i] < -10.0f) ||
+        (config->motor_target_trim_rpm[i] > 10.0f))
     {
       return 0U;
     }

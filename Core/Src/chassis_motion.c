@@ -2,11 +2,20 @@
 
 #include "app_config.h"
 #include "app_state.h"
+#include "encoder.h"
 #include "motor_control.h"
+#include "photo_sensor.h"
+#include "main.h"
 
 #define CHASSIS_OPEN_LOOP_PWM 75
 #define CHASSIS_DEFAULT_RPM 110
 #define CHASSIS_MIN_RPM 20
+#define CHASSIS_MOTOR_MASK_ORIGIN 0x03U
+#define CHASSIS_MOTOR_MASK_FAR    0x0CU
+#define CHASSIS_ROUTE_ALIGN_TIMEOUT_MS 1200U
+/* 路线定位以光电门为准；里程只做宽松合理性校验，不参与停车。 */
+#define CHASSIS_ROUTE_DISTANCE_MIN_PERCENT 45U
+#define CHASSIS_ROUTE_DISTANCE_MAX_PERCENT 165U
 
 static volatile uint8_t g_manual_active;
 static volatile uint8_t g_running;
@@ -16,6 +25,110 @@ static volatile int16_t g_target_rpm;
 static int16_t g_open_loop_command;
 static uint8_t g_applied_closed_loop;
 static uint8_t g_route_active;
+static uint8_t g_route_done;
+static uint8_t g_route_failed;
+static uint32_t g_route_deadline_tick;
+static volatile uint8_t g_side_running_mask;
+static volatile uint8_t g_photo_stop_armed;
+static volatile uint8_t g_photo_trigger_mask;
+static volatile uint8_t g_photo_stop_enabled;
+static uint32_t g_first_side_stop_tick;
+static uint16_t g_route_expected_distance_mm;
+static int32_t g_route_start_count[APP_MOTOR_COUNT];
+
+typedef enum
+{
+  ROUTE_DISTANCE_TOO_EARLY = 0,
+  ROUTE_DISTANCE_ACCEPTABLE,
+  ROUTE_DISTANCE_TOO_LATE
+} RouteDistanceStatus;
+
+static uint32_t CountDifference(int32_t current, int32_t start)
+{
+  int64_t difference = (int64_t)current - (int64_t)start;
+  return (uint32_t)((difference < 0) ? -difference : difference);
+}
+
+static RouteDistanceStatus ChassisMotion_GetSideDistanceStatus(uint8_t side)
+{
+  AppConfig config;
+  uint8_t first_motor = (side == CHASSIS_SIDE_ORIGIN) ? 0U : 2U;
+  uint32_t count_a = CountDifference(Encoder_GetCount(first_motor),
+                                     g_route_start_count[first_motor]);
+  uint32_t count_b = CountDifference(Encoder_GetCount(first_motor + 1U),
+                                     g_route_start_count[first_motor + 1U]);
+  uint32_t average_count = (count_a + count_b) / 2U;
+  uint32_t expected_count;
+  uint32_t minimum_count;
+  uint32_t maximum_count;
+
+  if (!g_route_active || (g_route_expected_distance_mm == 0U))
+    return ROUTE_DISTANCE_ACCEPTABLE;
+  AppConfig_GetSnapshot(&config);
+  expected_count = (uint32_t)(((float)g_route_expected_distance_mm *
+                               config.encoder_counts_per_output_rev /
+                               config.wheel_circumference_mm) + 0.5f);
+  minimum_count = expected_count * CHASSIS_ROUTE_DISTANCE_MIN_PERCENT / 100U;
+  maximum_count = expected_count * CHASSIS_ROUTE_DISTANCE_MAX_PERCENT / 100U;
+  if (average_count < minimum_count) return ROUTE_DISTANCE_TOO_EARLY;
+  if (average_count > maximum_count) return ROUTE_DISTANCE_TOO_LATE;
+  return ROUTE_DISTANCE_ACCEPTABLE;
+}
+
+static uint8_t ChassisPhotoMask(void)
+{
+  uint8_t mask = 0U;
+  if (PhotoSensor_GetState(PHOTO_SENSOR_CHASSIS_ORIGIN_SIDE)) mask |= 1U;
+  if (PhotoSensor_GetState(PHOTO_SENSOR_CHASSIS_FAR_SIDE)) mask |= 2U;
+  return mask;
+}
+
+static void ChassisMotion_ProcessPhotoStop(void)
+{
+  uint8_t blocked = ChassisPhotoMask();
+
+  if (!g_running || !g_photo_stop_enabled) return;
+  for (uint8_t side = CHASSIS_SIDE_ORIGIN; side <= CHASSIS_SIDE_FAR; side <<= 1U)
+  {
+    if ((g_side_running_mask & side) == 0U) continue;
+    if ((g_photo_stop_armed & side) == 0U)
+    {
+      /* 启动时若已遮挡，先等本侧离开；之后的下一次遮挡才停车。 */
+      if ((blocked & side) == 0U)
+      {
+        g_photo_stop_armed |= side;
+        g_photo_trigger_mask &= (uint8_t)~side;
+      }
+    }
+    else if (blocked & side)
+    {
+      RouteDistanceStatus distance_status =
+          ChassisMotion_GetSideDistanceStatus(side);
+      /* 光电门决定到站；编码器仅确认本次行程没有明显异常。 */
+      if (distance_status == ROUTE_DISTANCE_TOO_EARLY)
+      {
+        /* 停车后滑出、回弹或挡片边沿抖动仍属于当前地标，不能推进路线。 */
+        continue;
+      }
+      if (distance_status == ROUTE_DISTANCE_TOO_LATE)
+      {
+        g_route_active = 0U;
+        g_route_failed = 1U;
+        g_running = 0U;
+        g_side_running_mask = 0U;
+        MotorControl_Reset();
+        AppState_SetRunEnabled(0U);
+        return;
+      }
+      if (g_photo_trigger_mask == 0U) g_first_side_stop_tick = HAL_GetTick();
+      g_side_running_mask &= (uint8_t)~side;
+      g_photo_stop_armed &= (uint8_t)~side;
+      g_photo_trigger_mask |= side;
+    }
+  }
+  g_running = (g_side_running_mask != 0U) ? 1U : 0U;
+  AppState_SetRunEnabled(g_running);
+}
 
 void ChassisMotion_Init(void)
 {
@@ -27,6 +140,16 @@ void ChassisMotion_Init(void)
   g_open_loop_command = 0;
   g_applied_closed_loop = 1U;
   g_route_active = 0U;
+  g_route_done = 0U;
+  g_route_failed = 0U;
+  g_route_deadline_tick = 0U;
+  g_side_running_mask = 0U;
+  g_photo_trigger_mask = ChassisPhotoMask();
+  g_photo_stop_armed = 0U;
+  g_photo_stop_enabled = 1U;
+  g_first_side_stop_tick = 0U;
+  g_route_expected_distance_mm = 0U;
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i) g_route_start_count[i] = 0;
 }
 
 void ChassisMotion_ToggleRunning(void)
@@ -36,6 +159,19 @@ void ChassisMotion_ToggleRunning(void)
 
 void ChassisMotion_SetRunning(uint8_t running)
 {
+  if (running)
+  {
+    uint8_t blocked = ChassisPhotoMask();
+    g_side_running_mask = CHASSIS_SIDE_ALL;
+    /* 当前无遮挡侧立即布防；当前遮挡侧先离站，再等待下一次遮挡。 */
+    g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
+    g_photo_trigger_mask = 0U;
+  }
+  else
+  {
+    g_side_running_mask = 0U;
+    g_photo_stop_enabled = 1U;
+  }
   g_running = running ? 1U : 0U;
   g_manual_active = 1U;
   AppState_SetRunEnabled(g_running);
@@ -49,6 +185,26 @@ void ChassisMotion_StopManual(void)
 uint8_t ChassisMotion_IsRunning(void)
 {
   return g_running;
+}
+
+uint8_t ChassisMotion_IsPhotoStopArmed(void)
+{
+  return g_photo_stop_armed;
+}
+
+uint8_t ChassisMotion_GetPhotoTriggerMask(void)
+{
+  return g_photo_trigger_mask;
+}
+
+uint8_t ChassisMotion_GetRunningSideMask(void)
+{
+  return g_side_running_mask;
+}
+
+void ChassisMotion_SetPhotoStopEnabled(uint8_t enabled)
+{
+  if (!g_running) g_photo_stop_enabled = enabled ? 1U : 0U;
 }
 
 uint8_t ChassisMotion_SetDirection(uint8_t reverse)
@@ -118,8 +274,13 @@ void ChassisMotion_Stop(void)
 {
   g_manual_active = 0U;
   g_running = 0U;
+  g_side_running_mask = 0U;
   g_open_loop_command = 0;
   g_route_active = 0U;
+  g_route_done = 0U;
+  g_route_failed = 0U;
+  g_route_expected_distance_mm = 0U;
+  g_photo_stop_enabled = 1U;
   MotorControl_Reset();
   AppState_SetRunEnabled(0U);
 }
@@ -127,24 +288,47 @@ void ChassisMotion_Stop(void)
 uint8_t ChassisMotion_StartRouteSegment(int16_t distance_mm, int16_t turn_deg,
                                         uint16_t speed_rpm, uint16_t timeout_ms)
 {
-  (void)distance_mm;
-  (void)turn_deg;
-  (void)timeout_ms;
-  if (speed_rpm == 0U) return 0U;
-  MotorControl_SetAllTargetRpm((float)speed_rpm);
+  uint8_t blocked;
+  if ((distance_mm == 0) || (turn_deg != 0) || (speed_rpm == 0U) ||
+      (timeout_ms < 100U)) return 0U;
+
+  blocked = ChassisPhotoMask();
+  g_photo_stop_enabled = 1U;
+  g_manual_active = 0U;
+  g_reverse = (distance_mm < 0) ? 1U : 0U;
+  g_target_rpm = (int16_t)speed_rpm;
+  g_side_running_mask = CHASSIS_SIDE_ALL;
+  g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
+  g_photo_trigger_mask = 0U;
+  g_running = 1U;
   g_route_active = 1U;
+  g_route_done = 0U;
+  g_route_failed = 0U;
+  g_route_deadline_tick = HAL_GetTick() + timeout_ms;
+  g_first_side_stop_tick = 0U;
+  g_route_expected_distance_mm = (uint16_t)((distance_mm < 0) ?
+                                            -distance_mm : distance_mm);
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+    g_route_start_count[i] = Encoder_GetCount(i);
+  MotorControl_Reset();
+  AppState_SetRunEnabled(1U);
   return 1U;
 }
 
 uint8_t ChassisMotion_IsRouteSegmentDone(void)
 {
-  /* 地标/距离闭环接入前，不在底盘层虚报到位。 */
-  return g_route_active ? 0U : 1U;
+  return g_route_done;
+}
+
+uint8_t ChassisMotion_DidRouteSegmentFail(void)
+{
+  return g_route_failed;
 }
 
 void ChassisMotion_TaskStep(void)
 {
   AppState state;
+  ChassisMotion_ProcessPhotoStop();
   AppState_GetSnapshot(&state);
   if (state.estop_active)
   {
@@ -154,7 +338,47 @@ void ChassisMotion_TaskStep(void)
 
   if (g_route_active)
   {
-    MotorControl_Update(1U);
+    uint8_t motor_mask = 0U;
+    float target = g_reverse ? -(float)g_target_rpm : (float)g_target_rpm;
+    if ((int32_t)(HAL_GetTick() - g_route_deadline_tick) >= 0)
+    {
+      g_route_active = 0U;
+      g_route_failed = 1U;
+      g_running = 0U;
+      g_side_running_mask = 0U;
+      MotorControl_Reset();
+      AppState_SetRunEnabled(0U);
+      return;
+    }
+    if ((g_photo_trigger_mask != 0U) &&
+        (g_photo_trigger_mask != CHASSIS_SIDE_ALL) &&
+        ((uint32_t)(HAL_GetTick() - g_first_side_stop_tick) >
+         CHASSIS_ROUTE_ALIGN_TIMEOUT_MS))
+    {
+      /* 一侧已到站而另一侧长期未到，判定为挡板漏检或车架明显歪斜。 */
+      g_route_active = 0U;
+      g_route_failed = 1U;
+      g_running = 0U;
+      g_side_running_mask = 0U;
+      MotorControl_Reset();
+      AppState_SetRunEnabled(0U);
+      return;
+    }
+    if (g_side_running_mask == 0U)
+    {
+      g_route_active = 0U;
+      g_route_done = 1U;
+      g_running = 0U;
+      MotorControl_Reset();
+      AppState_SetRunEnabled(0U);
+      return;
+    }
+    MotorControl_SetAllTargetRpmCompensated(target);
+    if (g_side_running_mask & CHASSIS_SIDE_ORIGIN)
+      motor_mask |= CHASSIS_MOTOR_MASK_ORIGIN;
+    if (g_side_running_mask & CHASSIS_SIDE_FAR)
+      motor_mask |= CHASSIS_MOTOR_MASK_FAR;
+    MotorControl_UpdateMasked(motor_mask);
     return;
   }
 
@@ -167,13 +391,18 @@ void ChassisMotion_TaskStep(void)
   if (g_closed_loop)
   {
     float target = g_reverse ? -(float)g_target_rpm : (float)g_target_rpm;
+    uint8_t motor_mask = 0U;
     if (!g_applied_closed_loop)
     {
       MotorControl_Reset();
       g_applied_closed_loop = 1U;
     }
-    MotorControl_SetAllTargetRpm(target);
-    MotorControl_Update(g_running);
+    MotorControl_SetAllTargetRpmCompensated(target);
+    if (g_side_running_mask & CHASSIS_SIDE_ORIGIN)
+      motor_mask |= CHASSIS_MOTOR_MASK_ORIGIN;
+    if (g_side_running_mask & CHASSIS_SIDE_FAR)
+      motor_mask |= CHASSIS_MOTOR_MASK_FAR;
+    MotorControl_UpdateMasked(motor_mask);
     return;
   }
 
@@ -189,6 +418,12 @@ void ChassisMotion_TaskStep(void)
     g_open_loop_command = g_reverse ? -CHASSIS_OPEN_LOOP_PWM : CHASSIS_OPEN_LOOP_PWM;
 
   int16_t commands[APP_MOTOR_COUNT];
-  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i) commands[i] = g_open_loop_command;
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+  {
+    uint8_t side_running = (i < 2U) ?
+        (g_side_running_mask & CHASSIS_SIDE_ORIGIN) :
+        (g_side_running_mask & CHASSIS_SIDE_FAR);
+    commands[i] = side_running ? g_open_loop_command : 0;
+  }
   MotorControl_UpdateOpenLoop(commands);
 }

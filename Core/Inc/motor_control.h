@@ -7,7 +7,11 @@ void MotorControl_Init(void);
 /* 设置单轮目标转速，单位 RPM；实际输出会经过加速斜坡限制。 */
 void MotorControl_SetTargetRpm(uint8_t index, float rpm);
 void MotorControl_SetAllTargetRpm(float rpm);
+/* 设置整车基础目标，并按配置增加各轮速度绝对值补偿。 */
+void MotorControl_SetAllTargetRpmCompensated(float rpm);
 void MotorControl_Update(uint8_t enabled);
+/* 每一位控制对应电机是否参与闭环，bit0~3对应M1~M4。 */
+void MotorControl_UpdateMasked(uint8_t enabled_mask);
 /* 四轮开环诊断接口；正常运行使用闭环 MotorControl_Update。 */
 void MotorControl_UpdateOpenLoop(const int16_t pwm_command[4]);
 /* 清零积分和目标，并关闭四路电机。 */
