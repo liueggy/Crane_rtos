@@ -12,7 +12,7 @@
 #define CHASSIS_MIN_RPM 20
 #define CHASSIS_MOTOR_MASK_ORIGIN 0x03U
 #define CHASSIS_MOTOR_MASK_FAR    0x0CU
-#define CHASSIS_ROUTE_ALIGN_TIMEOUT_MS 1200U
+#define CHASSIS_ROUTE_ALIGN_TIMEOUT_MS 600U
 /* 路线定位以光电门为准；里程只做宽松合理性校验，不参与停车。 */
 #define CHASSIS_ROUTE_DISTANCE_MIN_PERCENT 45U
 #define CHASSIS_ROUTE_DISTANCE_MAX_PERCENT 165U
@@ -35,6 +35,8 @@ static volatile uint8_t g_photo_stop_enabled;
 static uint32_t g_first_side_stop_tick;
 static uint16_t g_route_expected_distance_mm;
 static int32_t g_route_start_count[APP_MOTOR_COUNT];
+static uint8_t g_route_target_landmarks;
+static volatile uint8_t g_passed_landmarks[2];
 
 typedef enum
 {
@@ -91,6 +93,8 @@ static void ChassisMotion_ProcessPhotoStop(void)
   for (uint8_t side = CHASSIS_SIDE_ORIGIN; side <= CHASSIS_SIDE_FAR; side <<= 1U)
   {
     if ((g_side_running_mask & side) == 0U) continue;
+    /* 本侧已经锁存当前组后继续行驶，但在另一侧确认前不允许重复计数。 */
+    if (g_photo_trigger_mask & side) continue;
     if ((g_photo_stop_armed & side) == 0U)
     {
       /* 启动时若已遮挡，先等本侧离开；之后的下一次遮挡才停车。 */
@@ -102,6 +106,17 @@ static void ChassisMotion_ProcessPhotoStop(void)
     }
     else if (blocked & side)
     {
+      uint8_t side_index = (side == CHASSIS_SIDE_ORIGIN) ? 0U : 1U;
+      if ((uint8_t)(g_passed_landmarks[side_index] + 1U) <
+          g_route_target_landmarks)
+      {
+        /* 单侧只锁存当前组事件；两侧均确认前四轮保持运行。 */
+        if (g_photo_trigger_mask == 0U) g_first_side_stop_tick = HAL_GetTick();
+        ++g_passed_landmarks[side_index];
+        g_photo_stop_armed &= (uint8_t)~side;
+        g_photo_trigger_mask |= side;
+        continue;
+      }
       RouteDistanceStatus distance_status =
           ChassisMotion_GetSideDistanceStatus(side);
       /* 光电门决定到站；编码器仅确认本次行程没有明显异常。 */
@@ -121,10 +136,28 @@ static void ChassisMotion_ProcessPhotoStop(void)
         return;
       }
       if (g_photo_trigger_mask == 0U) g_first_side_stop_tick = HAL_GetTick();
-      g_side_running_mask &= (uint8_t)~side;
       g_photo_stop_armed &= (uint8_t)~side;
       g_photo_trigger_mask |= side;
+      ++g_passed_landmarks[side_index];
     }
+  }
+  if ((g_photo_trigger_mask == CHASSIS_SIDE_ALL) &&
+      (g_passed_landmarks[0] < g_route_target_landmarks) &&
+      (g_passed_landmarks[1] < g_route_target_landmarks))
+  {
+    /* 同一中途地标两侧都确认后，统一清零四轮PI和斜坡；TaskStep随后
+     * 重新下发路线目标，保证四轮从0按同一斜坡重新起步。 */
+    MotorControl_Reset();
+    g_side_running_mask = CHASSIS_SIDE_ALL;
+    g_photo_trigger_mask = 0U;
+    g_first_side_stop_tick = 0U;
+  }
+  else if ((g_photo_trigger_mask == CHASSIS_SIDE_ALL) &&
+           (g_passed_landmarks[0] >= g_route_target_landmarks) &&
+           (g_passed_landmarks[1] >= g_route_target_landmarks))
+  {
+    /* 目标组两侧都确认后再让四轮同时停车，取消单边停车。 */
+    g_side_running_mask = 0U;
   }
   g_running = (g_side_running_mask != 0U) ? 1U : 0U;
   AppState_SetRunEnabled(g_running);
@@ -149,6 +182,9 @@ void ChassisMotion_Init(void)
   g_photo_stop_enabled = 1U;
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = 0U;
+  g_route_target_landmarks = 1U;
+  g_passed_landmarks[0] = 0U;
+  g_passed_landmarks[1] = 0U;
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i) g_route_start_count[i] = 0;
 }
 
@@ -280,6 +316,9 @@ void ChassisMotion_Stop(void)
   g_route_done = 0U;
   g_route_failed = 0U;
   g_route_expected_distance_mm = 0U;
+  g_route_target_landmarks = 1U;
+  g_passed_landmarks[0] = 0U;
+  g_passed_landmarks[1] = 0U;
   g_photo_stop_enabled = 1U;
   MotorControl_Reset();
   AppState_SetRunEnabled(0U);
@@ -288,8 +327,18 @@ void ChassisMotion_Stop(void)
 uint8_t ChassisMotion_StartRouteSegment(int16_t distance_mm, int16_t turn_deg,
                                         uint16_t speed_rpm, uint16_t timeout_ms)
 {
+  if (turn_deg != 0) return 0U;
+  return ChassisMotion_StartRouteThroughLandmarks(distance_mm, 1U, speed_rpm,
+                                                   timeout_ms);
+}
+
+uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
+                                                 uint8_t landmark_count,
+                                                 uint16_t speed_rpm,
+                                                 uint16_t timeout_ms)
+{
   uint8_t blocked;
-  if ((distance_mm == 0) || (turn_deg != 0) || (speed_rpm == 0U) ||
+  if ((distance_mm == 0) || (landmark_count == 0U) || (speed_rpm == 0U) ||
       (timeout_ms < 100U)) return 0U;
 
   blocked = ChassisPhotoMask();
@@ -308,11 +357,55 @@ uint8_t ChassisMotion_StartRouteSegment(int16_t distance_mm, int16_t turn_deg,
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = (uint16_t)((distance_mm < 0) ?
                                             -distance_mm : distance_mm);
+  g_route_target_landmarks = landmark_count;
+  g_passed_landmarks[0] = 0U;
+  g_passed_landmarks[1] = 0U;
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
     g_route_start_count[i] = Encoder_GetCount(i);
   MotorControl_Reset();
   AppState_SetRunEnabled(1U);
   return 1U;
+}
+
+uint8_t ChassisMotion_StartPhotoLandmarkRoute(uint8_t reverse,
+                                              uint8_t landmark_count,
+                                              uint16_t speed_rpm,
+                                              uint16_t timeout_ms)
+{
+  uint8_t blocked;
+  if ((landmark_count == 0U) || (speed_rpm == 0U) ||
+      (timeout_ms < 100U)) return 0U;
+
+  blocked = ChassisPhotoMask();
+  g_photo_stop_enabled = 1U;
+  g_manual_active = 0U;
+  g_reverse = reverse ? 1U : 0U;
+  g_target_rpm = (int16_t)speed_rpm;
+  g_side_running_mask = CHASSIS_SIDE_ALL;
+  g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
+  g_photo_trigger_mask = 0U;
+  g_running = 1U;
+  g_route_active = 1U;
+  g_route_done = 0U;
+  g_route_failed = 0U;
+  g_route_deadline_tick = HAL_GetTick() + timeout_ms;
+  g_first_side_stop_tick = 0U;
+  g_route_expected_distance_mm = 0U;
+  g_route_target_landmarks = landmark_count;
+  g_passed_landmarks[0] = 0U;
+  g_passed_landmarks[1] = 0U;
+  for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
+    g_route_start_count[i] = Encoder_GetCount(i);
+  MotorControl_Reset();
+  AppState_SetRunEnabled(1U);
+  return 1U;
+}
+
+uint8_t ChassisMotion_GetPassedLandmarkCount(uint8_t side)
+{
+  if (side == CHASSIS_SIDE_ORIGIN) return g_passed_landmarks[0];
+  if (side == CHASSIS_SIDE_FAR) return g_passed_landmarks[1];
+  return 0U;
 }
 
 uint8_t ChassisMotion_IsRouteSegmentDone(void)

@@ -13,6 +13,9 @@ static WorldSlotPose g_slots[WORLD_SLOT_COUNT];
 static WorldScanPose g_scans[WORLD_SCAN_COUNT];
 static WorldPose g_pose;
 
+_Static_assert(WORLD_STATION_COUNT == WORLD_PHOTO_LANDMARK_COUNT,
+               "世界地图地标数量必须与实物9组光电挡板一致");
+
 static const WorldStationId k_slot_stations[WORLD_SLOT_COUNT] = {
   WORLD_STATION_BEAN_AC_PICK,
   WORLD_STATION_BEAN_AC_PICK,
@@ -42,7 +45,7 @@ void WorldMap_Init(void)
     g_stations[i].id = (WorldStationId)i;
     g_stations[i].world_y_mm = WORLD_MAP_UNCALIBRATED;
   }
-  /* 场地中心起点的名义坐标已知，挡板对应Y坐标仍需实机测量。 */
+  /* 9组挡板拓扑已全部安装；场地中心起点名义坐标已知，其他绝对Y仍需测量。 */
   g_stations[WORLD_STATION_START].world_y_mm = 2000;
   g_stations[WORLD_STATION_START].calibrated = 1U;
 

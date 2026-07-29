@@ -34,7 +34,19 @@ void ChassisMotion_Stop(void);
  * 里程合理性校验；实际停车及到站判定始终由两侧光电门完成。 */
 uint8_t ChassisMotion_StartRouteSegment(int16_t distance_mm, int16_t turn_deg,
                                         uint16_t speed_rpm, uint16_t timeout_ms);
+/* 连续通过若干组Y挡板。单侧触发只锁存事件、不单边停车；两侧同组确认后：
+ * 中途地标统一复位速度环后续行，目标地标四轮同时停车。 */
+uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
+                                                 uint8_t landmark_count,
+                                                 uint16_t speed_rpm,
+                                                 uint16_t timeout_ms);
+/* 只按光电地标计数导航；reverse决定Y方向，编码器不参与距离窗口判断。 */
+uint8_t ChassisMotion_StartPhotoLandmarkRoute(uint8_t reverse,
+                                              uint8_t landmark_count,
+                                              uint16_t speed_rpm,
+                                              uint16_t timeout_ms);
 uint8_t ChassisMotion_IsRouteSegmentDone(void);
 uint8_t ChassisMotion_DidRouteSegmentFail(void);
+uint8_t ChassisMotion_GetPassedLandmarkCount(uint8_t side);
 
 #endif

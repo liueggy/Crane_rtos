@@ -1,6 +1,8 @@
 #include "ui_manager.h"
 
 #include "app_state.h"
+#include "bean_pickup_demo.h"
+#include "bean_sequence_demo.h"
 #include "box_calibration.h"
 #include "chassis_motion.h"
 #include "drop_demo.h"
@@ -17,6 +19,7 @@
 #include "stepper_axis.h"
 #include "z_calibration.h"
 #include "vision_route_demo.h"
+#include "xy_waypoint_demo.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -53,6 +56,68 @@ static const char *DropDemoStateText(DropDemoState state)
     case DROP_DEMO_COMPLETE: return "完成";
     case DROP_DEMO_FAULT: return "故障";
     case DROP_DEMO_IDLE:
+    default: return "待机";
+  }
+}
+
+static const char *BeanPickupDemoStateText(BeanPickupDemoState state)
+{
+  switch (state)
+  {
+    case BEAN_PICKUP_DEMO_HOME_Z_SETTLE:
+    case BEAN_PICKUP_DEMO_HOME_X_SETTLE:
+    case BEAN_PICKUP_DEMO_CLEAR_X_SETTLE:
+    case BEAN_PICKUP_DEMO_PREPARE_Z_SETTLE:
+    case BEAN_PICKUP_DEMO_MOVE_X_SETTLE:
+    case BEAN_PICKUP_DEMO_RAISE_SETTLE: return "换向等待";
+    case BEAN_PICKUP_DEMO_HOME_Z_TOP: return "Z回顶";
+    case BEAN_PICKUP_DEMO_HOME_X_RIGHT: return "X回零";
+    case BEAN_PICKUP_DEMO_CLEAR_X_LIMIT: return "X脱离";
+    case BEAN_PICKUP_DEMO_READY: return "READY";
+    case BEAN_PICKUP_DEMO_PREPARE_Z: return "最高位置";
+    case BEAN_PICKUP_DEMO_MOVE_X: return "移到X";
+    case BEAN_PICKUP_DEMO_OPEN_GRIPPER: return "张开";
+    case BEAN_PICKUP_DEMO_DESCEND: return "下降";
+    case BEAN_PICKUP_DEMO_CLOSE_GRIPPER: return "闭合";
+    case BEAN_PICKUP_DEMO_RAISE: return "上升";
+    case BEAN_PICKUP_DEMO_COMPLETE: return "完成";
+    case BEAN_PICKUP_DEMO_FAULT: return "故障";
+    case BEAN_PICKUP_DEMO_IDLE:
+    default: return "待机";
+  }
+}
+
+static const char *BeanSequenceDemoStateText(BeanSequenceDemoState state)
+{
+  switch (state)
+  {
+    case BEAN_SEQUENCE_DEMO_REFERENCE: return "XZ回零";
+    case BEAN_SEQUENCE_DEMO_MOVE_TO_B: return "前往B";
+    case BEAN_SEQUENCE_DEMO_PICK_B: return "抓B";
+    case BEAN_SEQUENCE_DEMO_RELEASE_B: return "B释放";
+    case BEAN_SEQUENCE_DEMO_MOVE_TO_AC: return "前往AC";
+    case BEAN_SEQUENCE_DEMO_PICK_C: return "抓C";
+    case BEAN_SEQUENCE_DEMO_RELEASE_C: return "C释放";
+    case BEAN_SEQUENCE_DEMO_PICK_A: return "抓A";
+    case BEAN_SEQUENCE_DEMO_COMPLETE: return "完成";
+    case BEAN_SEQUENCE_DEMO_FAULT: return "故障";
+    case BEAN_SEQUENCE_DEMO_IDLE:
+    default: return "待机";
+  }
+}
+
+static const char *XyWaypointDemoStateText(XyWaypointDemoState state)
+{
+  switch (state)
+  {
+    case XY_WAYPOINT_DEMO_REFERENCE: return "XZ回零";
+    case XY_WAYPOINT_DEMO_READY: return "READY";
+    case XY_WAYPOINT_DEMO_MOVE_Y: return "移动Y";
+    case XY_WAYPOINT_DEMO_X_SETTLE: return "换向等待";
+    case XY_WAYPOINT_DEMO_MOVE_X: return "移动X";
+    case XY_WAYPOINT_DEMO_COMPLETE: return "到达";
+    case XY_WAYPOINT_DEMO_FAULT: return "故障";
+    case XY_WAYPOINT_DEMO_IDLE:
     default: return "待机";
   }
 }
@@ -395,6 +460,61 @@ void UiManager_Render(void)
                      (long)StepperAxis_GetPositionPulses(STEPPER_AXIS_Z));
       DrawLine(32, line);
       DrawLine(48, "电源:启停 0:复位");
+      break;
+
+    case UI_PAGE_BEAN_PICKUP_DEMO:
+    {
+      uint8_t position = BeanPickupDemo_GetSelectedPosition();
+      static const int32_t x_positions[] = {
+        BEAN_SLOT_TOP_LEFT_X_PULSES,
+        BEAN_SLOT_OFFSET_X_PULSES,
+        BEAN_SLOT_TOP_RIGHT_X_PULSES,
+      };
+      static const int32_t z_positions[] = {
+        BEAN_PICKUP_Z_LEVEL_3_PULSES,
+        BEAN_PICKUP_Z_LEVEL_1_PULSES,
+        BEAN_PICKUP_Z_LEVEL_2_PULSES,
+      };
+      static const char *const position_names[] = {"左", "中", "右"};
+      DrawHeader("抓豆控制");
+      (void)snprintf(line, sizeof(line), "位置:%u%s 状态:%s",
+                     (unsigned)(position + 1U), position_names[position],
+                     BeanPickupDemoStateText(BeanPickupDemo_GetState()));
+      DrawLine(16, line);
+      (void)snprintf(line, sizeof(line), "目标 X:%ld Z:%ld",
+                     (long)x_positions[position], (long)z_positions[position]);
+      DrawLine(32, line);
+      DrawLine(48, "1/2/3选 电源:启动");
+      break;
+    }
+
+    case UI_PAGE_BEAN_SEQUENCE_DEMO:
+      DrawHeader("B-C-A抓豆");
+      (void)snprintf(line, sizeof(line), "状态:%s 速度:%d",
+                     BeanSequenceDemoStateText(BeanSequenceDemo_GetState()),
+                     (int)ChassisMotion_GetTargetRpm());
+      DrawLine(16, line);
+      (void)snprintf(line, sizeof(line), "挡板:%u/%u X:%ld",
+                     (unsigned)ChassisMotion_GetPassedLandmarkCount(
+                         CHASSIS_SIDE_ORIGIN),
+                     (unsigned)ChassisMotion_GetPassedLandmarkCount(
+                         CHASSIS_SIDE_FAR),
+                     (long)StepperAxis_GetPositionPulses(STEPPER_AXIS_X));
+      DrawLine(32, line);
+      DrawLine(48, "电源:启动 0:停止");
+      break;
+
+    case UI_PAGE_XY_WAYPOINT_DEMO:
+      DrawHeader("XY点位导航");
+      (void)snprintf(line, sizeof(line), "当前:%s 目标:%s",
+                     XyWaypointDemo_GetCurrentName(),
+                     XyWaypointDemo_GetName(XyWaypointDemo_GetSelected()));
+      DrawLine(16, line);
+      (void)snprintf(line, sizeof(line), "状态:%s X:%ld",
+                     XyWaypointDemoStateText(XyWaypointDemo_GetState()),
+                     (long)StepperAxis_GetPositionPulses(STEPPER_AXIS_X));
+      DrawLine(32, line);
+      DrawLine(48, "1-5箱 7A 8B 9C 电源走");
       break;
 
     case UI_PAGE_SERVO:

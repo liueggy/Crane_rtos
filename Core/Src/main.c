@@ -24,6 +24,9 @@
 /* USER CODE BEGIN Includes */
 #include "app_config.h"
 #include "app_state.h"
+#include "bean_pickup_demo.h"
+#include "bean_sequence_demo.h"
+#include "xy_waypoint_demo.h"
 #include "box_calibration.h"
 #include "chassis_motion.h"
 #include "buzzer.h"
@@ -201,6 +204,9 @@ int main(void)
   BoxCalibration_Init();
   ZCalibration_Init();
   InitializationDebug_Init();
+  BeanPickupDemo_Init();
+  BeanSequenceDemo_Init();
+  XyWaypointDemo_Init();
   DropDemo_Init();
   VisionRouteDemo_Init();
   if (InfraredRemote_Init(&htim4) != HAL_OK)
@@ -1047,6 +1053,9 @@ void StartAppCtrlTask(void *argument)
     RobotController_Update();
     OdometryCalibration_Process();
     InitializationDebug_Process();
+    BeanPickupDemo_Process();
+    BeanSequenceDemo_Process();
+    XyWaypointDemo_Process();
     DropDemo_Process();
     VisionRouteDemo_Process();
     StepperAxis_UpdateTelemetry();

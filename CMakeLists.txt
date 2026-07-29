@@ -87,6 +87,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/z_calibration.c
     Core/Src/initialization_debug.c
     Core/Src/odometry_calibration.c
+    Core/Src/bean_pickup_demo.c
+    Core/Src/bean_sequence_demo.c
+    Core/Src/xy_waypoint_demo.c
     Core/Src/drop_demo.c
     Core/Src/world_map.c
     Core/Src/vision_survey.c

@@ -48,7 +48,8 @@
  * 豆子点位1=中间凸出箱，点位2=顶部右箱，点位3=顶部左箱。
  */
 #define BEAN_PICKUP_Z_LEVEL_1_PULSES        2500
-#define BEAN_PICKUP_Z_LEVEL_2_PULSES        3600
+/* 3号遥控点位实机避险：较原3600上移约15.06mm（310脉冲）。 */
+#define BEAN_PICKUP_Z_LEVEL_2_PULSES        3290
 #define BEAN_PICKUP_Z_LEVEL_3_PULSES        4300
 #define NUMBER_DROP_Z_PULSES                3300
 /* 比最高抓取层再高约9.7mm，给横移和张爪留出余量。 */

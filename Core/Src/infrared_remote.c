@@ -1,6 +1,8 @@
 #include "infrared_remote.h"
 
 #include "main.h"
+#include "bean_pickup_demo.h"
+#include "bean_sequence_demo.h"
 #include "box_calibration.h"
 #include "buzzer.h"
 #include "chassis_motion.h"
@@ -15,6 +17,7 @@
 #include "ui_manager.h"
 #include "z_calibration.h"
 #include "vision_route_demo.h"
+#include "xy_waypoint_demo.h"
 
 /* TIM4 的 1 MHz 计数单位为微秒。以下窗口保留了接收头误差余量。 */
 #define IR_LEADER_MARK_MIN_US 8000U
@@ -177,6 +180,15 @@ void InfraredRemote_SyncToCurrentPage(void)
 {
   if ((UiManager_GetPage() != UI_PAGE_DROP_DEMO) &&
       (DropDemo_GetState() != DROP_DEMO_IDLE)) DropDemo_Abort();
+  if ((UiManager_GetPage() != UI_PAGE_BEAN_PICKUP_DEMO) &&
+      (BeanPickupDemo_GetState() != BEAN_PICKUP_DEMO_IDLE))
+    BeanPickupDemo_Abort();
+  if ((UiManager_GetPage() != UI_PAGE_BEAN_SEQUENCE_DEMO) &&
+      (BeanSequenceDemo_GetState() != BEAN_SEQUENCE_DEMO_IDLE))
+    BeanSequenceDemo_Abort();
+  if ((UiManager_GetPage() != UI_PAGE_XY_WAYPOINT_DEMO) &&
+      (XyWaypointDemo_GetState() != XY_WAYPOINT_DEMO_IDLE))
+    XyWaypointDemo_Abort();
   if ((UiManager_GetPage() != UI_PAGE_INITIALIZATION_DEBUG) &&
       (InitializationDebug_GetState() != INITIALIZATION_DEBUG_IDLE))
     InitializationDebug_Abort();
@@ -230,6 +242,18 @@ void InfraredRemote_SyncToCurrentPage(void)
       break;
 
     case UI_PAGE_DROP_DEMO:
+      InfraredRemote_StopSelectedTarget();
+      break;
+
+    case UI_PAGE_BEAN_PICKUP_DEMO:
+      InfraredRemote_StopSelectedTarget();
+      break;
+
+    case UI_PAGE_BEAN_SEQUENCE_DEMO:
+      InfraredRemote_StopSelectedTarget();
+      break;
+
+    case UI_PAGE_XY_WAYPOINT_DEMO:
       InfraredRemote_StopSelectedTarget();
       break;
 
@@ -496,6 +520,9 @@ void InfraredRemote_Process(void)
   if (command == IR_REMOTE_CMD_VOL_MINUS)
   {
     if (UiManager_GetPage() == UI_PAGE_DROP_DEMO) DropDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_BEAN_PICKUP_DEMO) BeanPickupDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_BEAN_SEQUENCE_DEMO) BeanSequenceDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_XY_WAYPOINT_DEMO) XyWaypointDemo_Abort();
     if (UiManager_GetPage() == UI_PAGE_INITIALIZATION_DEBUG)
       InitializationDebug_Abort();
     if (UiManager_GetPage() == UI_PAGE_ODOMETRY_CALIBRATION)
@@ -508,6 +535,9 @@ void InfraredRemote_Process(void)
   if (command == IR_REMOTE_CMD_VOL_PLUS)
   {
     if (UiManager_GetPage() == UI_PAGE_DROP_DEMO) DropDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_BEAN_PICKUP_DEMO) BeanPickupDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_BEAN_SEQUENCE_DEMO) BeanSequenceDemo_Abort();
+    if (UiManager_GetPage() == UI_PAGE_XY_WAYPOINT_DEMO) XyWaypointDemo_Abort();
     if (UiManager_GetPage() == UI_PAGE_INITIALIZATION_DEBUG)
       InitializationDebug_Abort();
     if (UiManager_GetPage() == UI_PAGE_ODOMETRY_CALIBRATION)
@@ -527,6 +557,46 @@ void InfraredRemote_Process(void)
   {
     if (command == IR_REMOTE_CMD_POWER) DropDemo_ToggleRunning();
     else if (command == IR_REMOTE_CMD_0) DropDemo_Abort();
+    return;
+  }
+
+  if (page == UI_PAGE_BEAN_PICKUP_DEMO)
+  {
+    if (!BeanPickupDemo_IsRunning() && (command == IR_REMOTE_CMD_1))
+      BeanPickupDemo_SelectPosition(0U);
+    else if (!BeanPickupDemo_IsRunning() && (command == IR_REMOTE_CMD_2))
+      BeanPickupDemo_SelectPosition(1U);
+    else if (!BeanPickupDemo_IsRunning() && (command == IR_REMOTE_CMD_3))
+      BeanPickupDemo_SelectPosition(2U);
+    else if (command == IR_REMOTE_CMD_POWER)
+      BeanPickupDemo_HandlePower();
+    else if (command == IR_REMOTE_CMD_0)
+      BeanPickupDemo_Abort();
+    return;
+  }
+
+  if (page == UI_PAGE_BEAN_SEQUENCE_DEMO)
+  {
+    if (command == IR_REMOTE_CMD_POWER) BeanSequenceDemo_Start();
+    else if (command == IR_REMOTE_CMD_0) BeanSequenceDemo_Abort();
+    return;
+  }
+
+  if (page == UI_PAGE_XY_WAYPOINT_DEMO)
+  {
+    XyWaypointId target = XY_WAYPOINT_COUNT;
+    if (command == IR_REMOTE_CMD_1) target = XY_WAYPOINT_NUMBER_1;
+    else if (command == IR_REMOTE_CMD_2) target = XY_WAYPOINT_NUMBER_2;
+    else if (command == IR_REMOTE_CMD_3) target = XY_WAYPOINT_NUMBER_3;
+    else if (command == IR_REMOTE_CMD_4) target = XY_WAYPOINT_NUMBER_4;
+    else if (command == IR_REMOTE_CMD_5) target = XY_WAYPOINT_NUMBER_5;
+    else if (command == IR_REMOTE_CMD_7) target = XY_WAYPOINT_A;
+    else if (command == IR_REMOTE_CMD_8) target = XY_WAYPOINT_B;
+    else if (command == IR_REMOTE_CMD_9) target = XY_WAYPOINT_C;
+
+    if (target < XY_WAYPOINT_COUNT) XyWaypointDemo_Select(target);
+    else if (command == IR_REMOTE_CMD_POWER) XyWaypointDemo_HandlePower();
+    else if (command == IR_REMOTE_CMD_0) XyWaypointDemo_Abort();
     return;
   }
 
