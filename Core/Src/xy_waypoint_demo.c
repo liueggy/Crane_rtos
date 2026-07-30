@@ -7,7 +7,6 @@
 #include "safety_manager.h"
 #include "stepper_axis.h"
 
-#define XY_WAYPOINT_CHASSIS_RPM             50U
 #define XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS  7000U
 #define XY_WAYPOINT_X_SETTLE_MS               300U
 
@@ -60,6 +59,7 @@ static void EnterFault(void)
   ChassisMotion_Stop();
   BeanPickupDemo_Abort();
   StepperAxis_StopAll();
+  WorldMap_InvalidateY();
   g_reference_valid = 0U;
   g_current_waypoint_valid = 0U;
   EnterState(XY_WAYPOINT_DEMO_FAULT);
@@ -90,14 +90,23 @@ static uint8_t StartRouteLeg(WorldStationId destination)
 {
   uint8_t landmark_count;
   uint8_t reverse;
+  int16_t rpm = ChassisMotion_GetTargetRpm();
   if (destination == g_current_station) return 0U;
+  if (rpm <= 0) return 0U;
   reverse = (destination < g_current_station) ? 1U : 0U;
   landmark_count = (uint8_t)((destination > g_current_station) ?
       (destination - g_current_station) :
       (g_current_station - destination));
-  if (!ChassisMotion_StartPhotoLandmarkRoute(
-          reverse, landmark_count, XY_WAYPOINT_CHASSIS_RPM,
-          (uint16_t)(landmark_count * XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS)))
+  if (WorldMap_RequiresBlockedAlignment(destination))
+  {
+    if (!ChassisMotion_StartAlignedPhotoLandmarkRoute(
+            reverse, landmark_count, (uint16_t)rpm,
+            (uint16_t)(landmark_count * XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS)))
+      return 0U;
+  }
+  else if (!ChassisMotion_StartPhotoLandmarkRoute(
+               reverse, landmark_count, (uint16_t)rpm,
+               (uint16_t)(landmark_count * XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS)))
     return 0U;
   g_leg_target_station = destination;
   EnterState(XY_WAYPOINT_DEMO_MOVE_Y);

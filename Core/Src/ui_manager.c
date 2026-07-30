@@ -94,13 +94,21 @@ static const char *BeanSequenceDemoStateText(BeanSequenceDemoState state)
   switch (state)
   {
     case BEAN_SEQUENCE_DEMO_REFERENCE: return "XZ回零";
-    case BEAN_SEQUENCE_DEMO_MOVE_TO_B: return "前往B";
+    case BEAN_SEQUENCE_DEMO_MOVE_TO_B:
+      if (ChassisMotion_GetAlignmentState() == CHASSIS_ALIGNMENT_SETTLING)
+        return "停稳检查";
+      if (ChassisMotion_GetAlignmentState() == CHASSIS_ALIGNMENT_RETURNING)
+        return "15速回退对齐";
+      return "前往B";
     case BEAN_SEQUENCE_DEMO_PICK_B: return "抓B";
-    case BEAN_SEQUENCE_DEMO_RELEASE_B: return "B释放";
-    case BEAN_SEQUENCE_DEMO_MOVE_TO_AC: return "前往AC";
+    case BEAN_SEQUENCE_DEMO_MOVE_TO_AC: return "直达AC";
+    case BEAN_SEQUENCE_DEMO_ALIGN_AC: return "15速回退对齐";
     case BEAN_SEQUENCE_DEMO_PICK_C: return "抓C";
-    case BEAN_SEQUENCE_DEMO_RELEASE_C: return "C释放";
     case BEAN_SEQUENCE_DEMO_PICK_A: return "抓A";
+    case BEAN_SEQUENCE_DEMO_HOLD: return "保持4秒";
+    case BEAN_SEQUENCE_DEMO_RETURN_DESCEND: return "降至上方5cm";
+    case BEAN_SEQUENCE_DEMO_RELEASE: return "张爪释放";
+    case BEAN_SEQUENCE_DEMO_RETURN_RAISE: return "重新抬升";
     case BEAN_SEQUENCE_DEMO_COMPLETE: return "完成";
     case BEAN_SEQUENCE_DEMO_FAULT: return "故障";
     case BEAN_SEQUENCE_DEMO_IDLE:
@@ -110,6 +118,12 @@ static const char *BeanSequenceDemoStateText(BeanSequenceDemoState state)
 
 static const char *XyWaypointDemoStateText(XyWaypointDemoState state)
 {
+  if (state == XY_WAYPOINT_DEMO_MOVE_Y)
+  {
+    ChassisAlignmentState alignment = ChassisMotion_GetAlignmentState();
+    if (alignment == CHASSIS_ALIGNMENT_SETTLING) return "停稳检查";
+    if (alignment == CHASSIS_ALIGNMENT_RETURNING) return "15速回退对齐";
+  }
   switch (state)
   {
     case XY_WAYPOINT_DEMO_REFERENCE: return "XZ回零";
@@ -489,10 +503,13 @@ void UiManager_Render(void)
     }
 
     case UI_PAGE_BEAN_SEQUENCE_DEMO:
-      DrawHeader("B-C-A抓豆");
-      (void)snprintf(line, sizeof(line), "状态:%s 速度:%d",
-                     BeanSequenceDemoStateText(BeanSequenceDemo_GetState()),
-                     (int)ChassisMotion_GetTargetRpm());
+    {
+      static const char position_name[] = {'A', 'B', 'C'};
+      uint8_t position = BeanSequenceDemo_GetCurrentPosition();
+      DrawHeader("抓取稳定测试");
+      (void)snprintf(line, sizeof(line), "箱:%c 状态:%s",
+                     (position < 3U) ? position_name[position] : '-',
+                     BeanSequenceDemoStateText(BeanSequenceDemo_GetState()));
       DrawLine(16, line);
       (void)snprintf(line, sizeof(line), "挡板:%u/%u X:%ld",
                      (unsigned)ChassisMotion_GetPassedLandmarkCount(
@@ -501,8 +518,9 @@ void UiManager_Render(void)
                          CHASSIS_SIDE_FAR),
                      (long)StepperAxis_GetPositionPulses(STEPPER_AXIS_X));
       DrawLine(32, line);
-      DrawLine(48, "电源:启动 0:停止");
+      DrawLine(48, "顺序:B>C>A 保持4秒");
       break;
+    }
 
     case UI_PAGE_XY_WAYPOINT_DEMO:
       DrawHeader("XY点位导航");

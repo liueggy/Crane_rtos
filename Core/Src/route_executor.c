@@ -36,6 +36,10 @@ static uint8_t StartCurrentSegment(void)
   if ((route == 0) || (g_segment_index >= route->count)) return 0U;
   const RobotRouteSegment *segment = &route->segments[g_segment_index];
   if (!segment->calibrated) return 0U;
+  if (WorldMap_RequiresBlockedAlignment(segment->expected_station))
+    return ChassisMotion_StartAlignedRouteSegment(
+        segment->distance_mm, segment->turn_deg,
+        segment->speed_rpm, segment->timeout_ms);
   return ChassisMotion_StartRouteSegment(segment->distance_mm, segment->turn_deg,
                                          segment->speed_rpm, segment->timeout_ms);
 }
@@ -101,6 +105,7 @@ void RouteExecutor_Update(void)
   }
   if (ChassisMotion_DidRouteSegmentFail())
   {
+    WorldMap_InvalidateY();
     g_state = ROUTE_EXECUTOR_FAULT;
     return;
   }

@@ -415,6 +415,9 @@ RobotFaultCode RobotController_GetFaultCode(void)
 
 const char *RobotController_GetPhaseText(void)
 {
+  ChassisAlignmentState alignment = ChassisMotion_GetAlignmentState();
+  if (alignment == CHASSIS_ALIGNMENT_SETTLING) return "停稳检查";
+  if (alignment == CHASSIS_ALIGNMENT_RETURNING) return "15速回退对齐";
   switch (g_state)
   {
     case ROBOT_STATE_SELF_CHECK: return "自检";

@@ -129,6 +129,12 @@ const WorldPose *WorldMap_GetPose(void)
   return &g_pose;
 }
 
+uint8_t WorldMap_RequiresBlockedAlignment(WorldStationId station)
+{
+  return (station == WORLD_STATION_BEAN_B_PICK) ||
+         (station == WORLD_STATION_NUMBER_SIDE_15);
+}
+
 uint8_t WorldMap_SetStationY(WorldStationId id, int32_t world_y_mm)
 {
   if ((id >= WORLD_STATION_COUNT) || (world_y_mm < 0) || (world_y_mm > 4000)) return 0U;

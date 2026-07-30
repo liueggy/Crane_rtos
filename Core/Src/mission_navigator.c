@@ -48,8 +48,13 @@ static uint8_t StartLeg(WorldStationId destination)
           (destination - pose->station) : (pose->station - destination));
   timeout = (uint32_t)count * MISSION_NAV_PER_LANDMARK_TIMEOUT_MS;
   if (timeout > UINT16_MAX) timeout = UINT16_MAX;
-  if (!ChassisMotion_StartPhotoLandmarkRoute(reverse, count, (uint16_t)rpm,
-                                               (uint16_t)timeout)) return 0U;
+  if (WorldMap_RequiresBlockedAlignment(destination))
+  {
+    if (!ChassisMotion_StartAlignedPhotoLandmarkRoute(
+            reverse, count, (uint16_t)rpm, (uint16_t)timeout)) return 0U;
+  }
+  else if (!ChassisMotion_StartPhotoLandmarkRoute(
+               reverse, count, (uint16_t)rpm, (uint16_t)timeout)) return 0U;
   g_leg_target_station = destination;
   g_state = MISSION_NAV_MOVE_Y;
   return 1U;

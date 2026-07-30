@@ -89,6 +89,8 @@ const WorldStation *WorldMap_GetStation(WorldStationId id);
 const WorldSlotPose *WorldMap_GetSlot(WorldSlotId id);
 const WorldScanPose *WorldMap_GetScanPose(WorldScanPoseId id);
 const WorldPose *WorldMap_GetPose(void);
+/* 只有凸出B箱和数字侧箱1/5需要停车后再次确认双侧遮挡。 */
+uint8_t WorldMap_RequiresBlockedAlignment(WorldStationId station);
 
 uint8_t WorldMap_SetStationY(WorldStationId id, int32_t world_y_mm);
 uint8_t WorldMap_SetSlotPose(WorldSlotId id, int32_t x_pulses,

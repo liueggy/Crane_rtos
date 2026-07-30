@@ -18,6 +18,9 @@
 /* 路线定位以光电门为准；里程只做宽松合理性校验，不参与停车。 */
 #define CHASSIS_ROUTE_DISTANCE_MIN_PERCENT 45U
 #define CHASSIS_ROUTE_DISTANCE_MAX_PERCENT 165U
+#define CHASSIS_PRECISION_SETTLE_MS         300U
+#define CHASSIS_PRECISION_RETURN_RPM         15U
+#define CHASSIS_PRECISION_RETURN_TIMEOUT_MS 5000U
 
 static volatile uint8_t g_manual_active;
 static volatile uint8_t g_running;
@@ -40,6 +43,11 @@ static uint16_t g_route_expected_distance_mm;
 static int32_t g_route_start_count[APP_MOTOR_COUNT];
 static uint8_t g_route_target_landmarks;
 static volatile uint8_t g_passed_landmarks[2];
+static uint16_t g_route_command_rpm;
+static uint8_t g_route_primary_reverse;
+static uint8_t g_route_require_alignment;
+static ChassisAlignmentState g_alignment_state;
+static uint32_t g_alignment_deadline_tick;
 
 static uint32_t ScaleRouteTimeout(uint16_t nominal_speed_rpm,
                                   uint16_t nominal_timeout_ms)
@@ -97,6 +105,49 @@ static uint8_t ChassisPhotoMask(void)
   return mask;
 }
 
+static void FinishRoute(void)
+{
+  g_route_active = 0U;
+  g_route_done = 1U;
+  g_running = 0U;
+  g_side_running_mask = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_NONE;
+  MotorControl_Reset();
+  AppState_SetRunEnabled(0U);
+}
+
+static void FailRoute(void)
+{
+  g_route_active = 0U;
+  g_route_failed = 1U;
+  g_running = 0U;
+  g_side_running_mask = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_NONE;
+  MotorControl_Reset();
+  AppState_SetRunEnabled(0U);
+}
+
+static void BeginPrecisionReturn(void)
+{
+  uint8_t blocked = ChassisPhotoMask();
+  g_reverse = g_route_primary_reverse ? 0U : 1U;
+  g_route_command_rpm = CHASSIS_PRECISION_RETURN_RPM;
+  g_route_expected_distance_mm = 0U;
+  g_route_target_landmarks = 1U;
+  g_route_require_alignment = 0U;
+  g_passed_landmarks[0] = (blocked & CHASSIS_SIDE_ORIGIN) ? 1U : 0U;
+  g_passed_landmarks[1] = (blocked & CHASSIS_SIDE_FAR) ? 1U : 0U;
+  g_photo_trigger_mask = blocked;
+  g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
+  g_first_side_stop_tick = (blocked != 0U) ? HAL_GetTick() : 0U;
+  g_route_deadline_tick = HAL_GetTick() + CHASSIS_PRECISION_RETURN_TIMEOUT_MS;
+  g_side_running_mask = CHASSIS_SIDE_ALL;
+  g_running = 1U;
+  g_alignment_state = CHASSIS_ALIGNMENT_RETURNING;
+  MotorControl_Reset();
+  AppState_SetRunEnabled(1U);
+}
+
 static void ChassisMotion_ProcessPhotoStop(void)
 {
   uint8_t blocked = ChassisPhotoMask();
@@ -139,12 +190,7 @@ static void ChassisMotion_ProcessPhotoStop(void)
       }
       if (distance_status == ROUTE_DISTANCE_TOO_LATE)
       {
-        g_route_active = 0U;
-        g_route_failed = 1U;
-        g_running = 0U;
-        g_side_running_mask = 0U;
-        MotorControl_Reset();
-        AppState_SetRunEnabled(0U);
+        FailRoute();
         return;
       }
       if (g_photo_trigger_mask == 0U) g_first_side_stop_tick = HAL_GetTick();
@@ -194,6 +240,11 @@ void ChassisMotion_Init(void)
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = 0U;
   g_route_target_landmarks = 1U;
+  g_route_command_rpm = CHASSIS_DEFAULT_RPM;
+  g_route_primary_reverse = 0U;
+  g_route_require_alignment = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_NONE;
+  g_alignment_deadline_tick = 0U;
   g_passed_landmarks[0] = 0U;
   g_passed_landmarks[1] = 0U;
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i) g_route_start_count[i] = 0;
@@ -345,6 +396,8 @@ void ChassisMotion_Stop(void)
   g_route_failed = 0U;
   g_route_expected_distance_mm = 0U;
   g_route_target_landmarks = 1U;
+  g_route_require_alignment = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_NONE;
   g_passed_landmarks[0] = 0U;
   g_passed_landmarks[1] = 0U;
   g_photo_stop_enabled = 1U;
@@ -358,6 +411,18 @@ uint8_t ChassisMotion_StartRouteSegment(int16_t distance_mm, int16_t turn_deg,
   if (turn_deg != 0) return 0U;
   return ChassisMotion_StartRouteThroughLandmarks(distance_mm, 1U, speed_rpm,
                                                    timeout_ms);
+}
+
+uint8_t ChassisMotion_StartAlignedRouteSegment(int16_t distance_mm,
+                                               int16_t turn_deg,
+                                               uint16_t speed_rpm,
+                                               uint16_t timeout_ms)
+{
+  if (!ChassisMotion_StartRouteSegment(distance_mm, turn_deg, speed_rpm,
+                                        timeout_ms)) return 0U;
+  g_route_require_alignment = 1U;
+  g_route_primary_reverse = g_reverse;
+  return 1U;
 }
 
 uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
@@ -384,8 +449,13 @@ uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
                           ScaleRouteTimeout(speed_rpm, timeout_ms);
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = (uint16_t)((distance_mm < 0) ?
-                                            -distance_mm : distance_mm);
+                                             -distance_mm : distance_mm);
   g_route_target_landmarks = landmark_count;
+  /* 普通路线始终服从底盘页的全局速度，不覆盖手动设定。 */
+  g_route_command_rpm = (uint16_t)g_target_rpm;
+  g_route_primary_reverse = g_reverse;
+  g_route_require_alignment = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_NONE;
   g_passed_landmarks[0] = 0U;
   g_passed_landmarks[1] = 0U;
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
@@ -420,10 +490,85 @@ uint8_t ChassisMotion_StartPhotoLandmarkRoute(uint8_t reverse,
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = 0U;
   g_route_target_landmarks = landmark_count;
+  g_route_command_rpm = (uint16_t)g_target_rpm;
+  g_route_primary_reverse = g_reverse;
+  g_route_require_alignment = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_NONE;
   g_passed_landmarks[0] = 0U;
   g_passed_landmarks[1] = 0U;
   for (uint8_t i = 0U; i < APP_MOTOR_COUNT; ++i)
     g_route_start_count[i] = Encoder_GetCount(i);
+  MotorControl_Reset();
+  AppState_SetRunEnabled(1U);
+  return 1U;
+}
+
+uint8_t ChassisMotion_StartAlignedRouteThroughLandmarks(int16_t distance_mm,
+                                                        uint8_t landmark_count,
+                                                        uint16_t speed_rpm,
+                                                        uint16_t timeout_ms)
+{
+  if (!ChassisMotion_StartRouteThroughLandmarks(distance_mm, landmark_count,
+                                                 speed_rpm, timeout_ms))
+    return 0U;
+  g_route_require_alignment = 1U;
+  g_route_primary_reverse = g_reverse;
+  return 1U;
+}
+
+uint8_t ChassisMotion_StartAlignedPhotoLandmarkRoute(uint8_t reverse,
+                                                     uint8_t landmark_count,
+                                                     uint16_t speed_rpm,
+                                                     uint16_t timeout_ms)
+{
+  if (!ChassisMotion_StartPhotoLandmarkRoute(reverse, landmark_count,
+                                              speed_rpm, timeout_ms)) return 0U;
+  g_route_require_alignment = 1U;
+  g_route_primary_reverse = reverse ? 1U : 0U;
+  return 1U;
+}
+
+uint8_t ChassisMotion_StartPhotoBlockedAlignment(uint8_t reverse,
+                                                 uint16_t speed_rpm,
+                                                 uint16_t timeout_ms)
+{
+  uint8_t blocked;
+  if (g_running || g_route_active || (speed_rpm == 0U) ||
+      (timeout_ms < 100U)) return 0U;
+
+  blocked = ChassisPhotoMask();
+  g_photo_stop_enabled = 1U;
+  g_manual_active = 0U;
+  g_reverse = reverse ? 1U : 0U;
+  g_route_done = 0U;
+  g_route_failed = 0U;
+  g_route_expected_distance_mm = 0U;
+  g_route_target_landmarks = 1U;
+  g_route_require_alignment = 0U;
+  g_alignment_state = CHASSIS_ALIGNMENT_RETURNING;
+  g_route_command_rpm = speed_rpm;
+  g_passed_landmarks[0] = (blocked & CHASSIS_SIDE_ORIGIN) ? 1U : 0U;
+  g_passed_landmarks[1] = (blocked & CHASSIS_SIDE_FAR) ? 1U : 0U;
+  g_photo_trigger_mask = blocked;
+  g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
+  g_first_side_stop_tick = (blocked != 0U) ? HAL_GetTick() : 0U;
+
+  if (blocked == CHASSIS_SIDE_ALL)
+  {
+    g_route_active = 0U;
+    g_running = 0U;
+    g_side_running_mask = 0U;
+    g_route_done = 1U;
+    g_alignment_state = CHASSIS_ALIGNMENT_NONE;
+    MotorControl_Reset();
+    AppState_SetRunEnabled(0U);
+    return 1U;
+  }
+
+  g_route_deadline_tick = HAL_GetTick() + timeout_ms;
+  g_side_running_mask = CHASSIS_SIDE_ALL;
+  g_running = 1U;
+  g_route_active = 1U;
   MotorControl_Reset();
   AppState_SetRunEnabled(1U);
   return 1U;
@@ -460,15 +605,19 @@ void ChassisMotion_TaskStep(void)
   if (g_route_active)
   {
     uint8_t motor_mask = 0U;
-    float target = g_reverse ? -(float)g_target_rpm : (float)g_target_rpm;
+    float target = g_reverse ? -(float)g_route_command_rpm :
+                               (float)g_route_command_rpm;
+    if (g_alignment_state == CHASSIS_ALIGNMENT_SETTLING)
+    {
+      MotorControl_Reset();
+      if ((int32_t)(HAL_GetTick() - g_alignment_deadline_tick) < 0) return;
+      if (ChassisPhotoMask() == CHASSIS_SIDE_ALL) FinishRoute();
+      else BeginPrecisionReturn();
+      return;
+    }
     if ((int32_t)(HAL_GetTick() - g_route_deadline_tick) >= 0)
     {
-      g_route_active = 0U;
-      g_route_failed = 1U;
-      g_running = 0U;
-      g_side_running_mask = 0U;
-      MotorControl_Reset();
-      AppState_SetRunEnabled(0U);
+      FailRoute();
       return;
     }
     if ((g_photo_trigger_mask != 0U) &&
@@ -477,21 +626,25 @@ void ChassisMotion_TaskStep(void)
          g_align_timeout_ms))
     {
       /* 一侧已到站而另一侧长期未到，判定为挡板漏检或车架明显歪斜。 */
-      g_route_active = 0U;
-      g_route_failed = 1U;
-      g_running = 0U;
-      g_side_running_mask = 0U;
-      MotorControl_Reset();
-      AppState_SetRunEnabled(0U);
+      FailRoute();
       return;
     }
     if (g_side_running_mask == 0U)
     {
-      g_route_active = 0U;
-      g_route_done = 1U;
-      g_running = 0U;
-      MotorControl_Reset();
-      AppState_SetRunEnabled(0U);
+      if (g_alignment_state == CHASSIS_ALIGNMENT_RETURNING)
+      {
+        if (ChassisPhotoMask() == CHASSIS_SIDE_ALL) FinishRoute();
+        else FailRoute();
+      }
+      else if (g_route_require_alignment)
+      {
+        g_running = 0U;
+        g_alignment_state = CHASSIS_ALIGNMENT_SETTLING;
+        g_alignment_deadline_tick = HAL_GetTick() + CHASSIS_PRECISION_SETTLE_MS;
+        MotorControl_Reset();
+        AppState_SetRunEnabled(0U);
+      }
+      else FinishRoute();
       return;
     }
     MotorControl_SetAllTargetRpmCompensated(target);
@@ -547,4 +700,9 @@ void ChassisMotion_TaskStep(void)
     commands[i] = side_running ? g_open_loop_command : 0;
   }
   MotorControl_UpdateOpenLoop(commands);
+}
+
+ChassisAlignmentState ChassisMotion_GetAlignmentState(void)
+{
+  return g_alignment_state;
 }
