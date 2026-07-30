@@ -605,14 +605,51 @@ void UiManager_Render(void)
       VisionRouteDemoState demo_state = VisionRouteDemo_GetState();
       K230VisionResult number_result;
       K230VisionResult bean_result;
+      K230VisionResult live_result;
       memset(&number_result, 0, sizeof(number_result));
       memset(&bean_result, 0, sizeof(bean_result));
+      memset(&live_result, 0, sizeof(live_result));
       number_result.task = K230_TASK_NUMBER;
       bean_result.task = K230_TASK_BEAN;
-      (void)VisionRouteDemo_GetDisplayResult(&number_result);
-      (void)VisionRouteDemo_GetDisplayResult(&bean_result);
 
       DrawHeader("视觉识别");
+      if (demo_state == VISION_ROUTE_DEMO_IDLE)
+      {
+        K230TaskSwitchState switch_state = K230Link_GetTaskSwitchState();
+        K230VisionTask shown_task = (switch_state == K230_TASK_SWITCH_PENDING) ?
+                                     K230Link_GetRequestedTask() :
+                                     K230Link_GetSelectedTask();
+        char received = '-';
+        DrawLine(16, "1:数字 2:豆子");
+        if (switch_state == K230_TASK_SWITCH_PENDING)
+          (void)snprintf(line, sizeof(line), "模式:切%s",
+                         (shown_task == K230_TASK_BEAN) ? "豆子" : "数字");
+        else if (switch_state == K230_TASK_SWITCH_FAILED)
+          (void)snprintf(line, sizeof(line), "模式:切换失败");
+        else
+          (void)snprintf(line, sizeof(line), "模式:%s%s",
+                         (shown_task == K230_TASK_BEAN) ? "豆子" : "数字",
+                         state.k230_online ? "" : " 离线");
+        DrawLine(32, line);
+
+        if (K230Link_GetLatestResult(&live_result) && live_result.valid &&
+            (live_result.count > 0U) && K230Link_IsResultFresh(1000U))
+        {
+          uint8_t semantic = live_result.targets[0].semantic;
+          if ((semantic >= K230_SEMANTIC_NUMBER_1) &&
+              (semantic <= K230_SEMANTIC_NUMBER_5))
+            received = (char)('0' + semantic);
+          else if (semantic == K230_SEMANTIC_BEAN_L) received = 'L';
+          else if (semantic == K230_SEMANTIC_BEAN_H) received = 'H';
+          else if (semantic == K230_SEMANTIC_BEAN_B) received = 'B';
+        }
+        (void)snprintf(line, sizeof(line), "接收:%c", received);
+        DrawLine(48, line);
+        break;
+      }
+
+      (void)VisionRouteDemo_GetDisplayResult(&number_result);
+      (void)VisionRouteDemo_GetDisplayResult(&bean_result);
       FormatNumberVisionLine(&number_result, line, sizeof(line));
       DrawLine(16, line);
       FormatBeanVisionLine(&bean_result, line, sizeof(line));

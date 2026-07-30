@@ -19,7 +19,9 @@
 #define VISION_DEMO_X_HOME_TIMEOUT_MS     22000U
 #define VISION_DEMO_X_MOVE_TIMEOUT_MS     16000U
 #define VISION_DEMO_POINT_DWELL_MS          1000U
+#define VISION_DEMO_POINT_SETTLE_MS          400U
 #define VISION_DEMO_RESCAN_DWELL_MS         2000U
+#define VISION_DEMO_TASK_SWITCH_TIMEOUT_MS 10000U
 #define VISION_DEMO_DIRECTION_SETTLE_MS     300U
 #define VISION_DEMO_NUMBER_YAW_DEGREES         0U
 #define VISION_DEMO_NUMBER_SIDE_YAW_DEGREES   54U
@@ -27,13 +29,7 @@
 #define VISION_DEMO_BEAN_B_YAW_DEGREES       194U
 #define VISION_DEMO_DISPLAY_WIDTH             640U
 #define VISION_DEMO_STABLE_HITS                  2U
-#define VISION_DEMO_ROW_CENTER_X                320U
-#define VISION_DEMO_ROW_ROI_HALF_WIDTH          224U
 #define VISION_DEMO_ROW_SLOT_WINDOW_PULSES     4000U
-#define VISION_DEMO_ROW_STABLE_SCORE            220U
-#define VISION_DEMO_ROW_SCORE_MARGIN             50U
-/* 侧视姿态下画面左侧目标对应物理5号箱；安装方向变化时只改此常量。 */
-#define VISION_DEMO_SIDE_LEFT_IS_NUMBER_5         1U
 #define VISION_NUMBER_COMPLETE_MASK             0x1FU
 #define VISION_BEAN_COMPLETE_MASK               0x07U
 
@@ -45,13 +41,28 @@ typedef struct
   uint8_t confidence;
 } VisionSlotVote;
 
+typedef enum
+{
+  DEBUG_STREAM_WAIT_TASK = 0,
+  DEBUG_STREAM_WAIT_SETTLE,
+  DEBUG_STREAM_ACQUIRE,
+  DEBUG_STREAM_DONE
+} DebugStreamPhase;
+
 static VisionRouteDemoState g_state;
 static uint8_t g_stage_started;
 static uint8_t g_result_warning;
+static uint8_t g_debug_step_scan;
 static uint8_t g_retry_active;
 static uint8_t g_number_retry_used;
 static uint8_t g_bean_retry_used;
 static uint8_t g_rescan_cursor;
+static uint8_t g_debug_row_slot;
+static DebugStreamPhase g_debug_stream_phase;
+static uint16_t g_debug_stream_settle_ms;
+static uint16_t g_debug_stream_dwell_ms;
+static uint8_t g_debug_stream_majority_slot;
+static uint32_t g_debug_stream_switch_deadline;
 static uint32_t g_deadline;
 static uint32_t g_not_before_tick;
 static uint16_t g_last_sequence;
@@ -59,15 +70,20 @@ static K230VisionResult g_number_display_result;
 static K230VisionResult g_bean_display_result;
 static VisionSlotVote g_number_votes[5];
 static VisionSlotVote g_bean_votes[3];
-static uint16_t g_number_row_scores[5][5];
-static uint8_t g_number_row_support[5][5];
-static uint8_t g_number_row_peak_confidence[5][5];
+/* 调试页定点采集只统计K230串口返回的数字次数，不参与连续扫描加权。 */
+static uint16_t g_debug_number_counts[5][5];
+/* 豆子调试采集同样按A/B姿态分别统计L/H/B出现次数。 */
+static uint16_t g_debug_bean_counts[2][3];
 static VisionSurveyMap g_survey_map;
 
 static void AcceptDynamicNumberRowFrame(const K230VisionResult *result);
+static void AcceptDebugNumberFrame(uint8_t physical_slot);
+static void AcceptDebugBeanFrame(uint8_t physical_slot);
 static void AcceptNumberSideFrame(const K230VisionResult *result);
 static void AcceptBeanPoseFrame(const K230VisionResult *result, uint8_t slot);
 static void RefreshSurveyMap(void);
+static uint8_t NumberSemanticUsedByOtherSlot(uint8_t semantic,
+                                             uint8_t physical_slot);
 static uint8_t NumberMapValid(void);
 static uint8_t BeanMapValid(void);
 
@@ -161,6 +177,18 @@ static void AcceptVote(VisionSlotVote *vote, uint8_t semantic,
   if (vote->hits >= VISION_DEMO_STABLE_HITS) vote->stable = 1U;
 }
 
+static uint8_t NumberSemanticUsedByOtherSlot(uint8_t semantic,
+                                             uint8_t physical_slot)
+{
+  /* 物理1号是排除结果，不参与2/3/4/5直接采集时的互斥占用。 */
+  for (uint8_t slot = 1U; slot < 5U; ++slot)
+  {
+    if ((slot != physical_slot) && g_number_votes[slot].stable &&
+        (g_number_votes[slot].candidate == semantic)) return 1U;
+  }
+  return 0U;
+}
+
 static void AcceptLatestFrame(K230VisionTask task)
 {
   K230VisionResult result;
@@ -177,8 +205,8 @@ static void AcceptLatestFrame(K230VisionTask task)
        (g_state == VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL)))
   {
     AcceptDynamicNumberRowFrame(&result);
-    RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
     RefreshSurveyMap();
+    RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
     return;
   }
   if ((task == K230_TASK_NUMBER) &&
@@ -186,17 +214,218 @@ static void AcceptLatestFrame(K230VisionTask task)
        (g_state == VISION_ROUTE_DEMO_RESCAN_NUMBER_SIDE)))
   {
     AcceptNumberSideFrame(&result);
-    RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
     RefreshSurveyMap();
+    RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
     return;
   }
   if (task == K230_TASK_BEAN)
   {
     uint8_t slot = (g_state == VISION_ROUTE_DEMO_SCAN_BEAN_A) ? 0U : 1U;
     AcceptBeanPoseFrame(&result, slot);
-    RebuildDisplayResult(K230_TASK_BEAN, g_bean_votes, 3U);
     RefreshSurveyMap();
+    RebuildDisplayResult(K230_TASK_BEAN, g_bean_votes, 3U);
   }
+}
+
+static void ResetDebugNumberSlot(uint8_t physical_slot)
+{
+  if (physical_slot >= 5U) return;
+  memset(g_debug_number_counts[physical_slot], 0,
+         sizeof(g_debug_number_counts[physical_slot]));
+  memset(&g_number_votes[physical_slot], 0,
+         sizeof(g_number_votes[physical_slot]));
+  RefreshSurveyMap();
+  RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
+}
+
+static void ResetDebugBeanSlot(uint8_t physical_slot)
+{
+  if (physical_slot >= 2U) return;
+  memset(g_debug_bean_counts[physical_slot], 0,
+         sizeof(g_debug_bean_counts[physical_slot]));
+  memset(&g_bean_votes[physical_slot], 0,
+         sizeof(g_bean_votes[physical_slot]));
+  RefreshSurveyMap();
+  RebuildDisplayResult(K230_TASK_BEAN, g_bean_votes, 3U);
+}
+
+static void BeginDebugStreamWindow(uint16_t settle_ms, uint16_t dwell_ms,
+                                   uint8_t majority_slot)
+{
+  uint32_t now = HAL_GetTick();
+  K230Link_InvalidateResult();
+  g_debug_stream_phase = DEBUG_STREAM_WAIT_TASK;
+  g_debug_stream_settle_ms = settle_ms;
+  g_debug_stream_dwell_ms = dwell_ms;
+  g_debug_stream_majority_slot = majority_slot;
+  g_debug_stream_switch_deadline =
+      now + VISION_DEMO_TASK_SWITCH_TIMEOUT_MS;
+}
+
+/* K230一直自动发送结果；STM32只在本地时间窗内统计新字符。 */
+static uint8_t ProcessDebugStreamWindow(K230VisionTask task)
+{
+  uint32_t now = HAL_GetTick();
+  if (g_debug_stream_phase == DEBUG_STREAM_WAIT_TASK)
+  {
+    K230TaskSwitchState switch_state = K230Link_GetTaskSwitchState();
+    if (switch_state == K230_TASK_SWITCH_FAILED) return 0U;
+    if ((switch_state != K230_TASK_SWITCH_IDLE) ||
+        (K230Link_GetSelectedTask() != task))
+      return TimeReached(g_debug_stream_switch_deadline) ? 0U : 1U;
+    g_debug_stream_phase = DEBUG_STREAM_WAIT_SETTLE;
+    g_not_before_tick = now + g_debug_stream_settle_ms;
+    return 1U;
+  }
+  if (g_debug_stream_phase == DEBUG_STREAM_WAIT_SETTLE)
+  {
+    if (!TimeReached(g_not_before_tick)) return 1U;
+    K230Link_InvalidateResult();
+    if ((task == K230_TASK_NUMBER) &&
+        (g_debug_stream_majority_slot < 5U))
+      ResetDebugNumberSlot(g_debug_stream_majority_slot);
+    else if (task == K230_TASK_BEAN)
+      ResetDebugBeanSlot((g_state == VISION_ROUTE_DEMO_SCAN_BEAN_A) ? 0U : 1U);
+    g_debug_stream_phase = DEBUG_STREAM_ACQUIRE;
+    g_deadline = now + g_debug_stream_dwell_ms;
+    return 1U;
+  }
+  if (g_debug_stream_phase == DEBUG_STREAM_ACQUIRE)
+  {
+    if ((task == K230_TASK_NUMBER) &&
+        (g_debug_stream_majority_slot < 5U))
+      AcceptDebugNumberFrame(g_debug_stream_majority_slot);
+    else if (task == K230_TASK_BEAN)
+      AcceptDebugBeanFrame((g_state == VISION_ROUTE_DEMO_SCAN_BEAN_A) ? 0U : 1U);
+    else AcceptLatestFrame(task);
+    if (DeadlineExpired())
+    {
+      K230Link_InvalidateResult();
+      g_debug_stream_phase = DEBUG_STREAM_DONE;
+      return 2U;
+    }
+    return 1U;
+  }
+  return 2U;
+}
+
+/* 定点多数票：当前物理框每收到一个新字符立即刷新领先结果。
+ * 已被其他物理2/3/4/5号框锁定的数字不再参与当前框竞争；平票时保留当前
+ * 领先值避免OLED框反复变空。采集窗口结束后该值保持锁存。 */
+static void AcceptDebugNumberFrame(uint8_t physical_slot)
+{
+  K230VisionResult result;
+  uint16_t best_count = 0U;
+  uint8_t best_semantic = UINT8_MAX;
+  uint8_t current_semantic;
+
+  if ((physical_slot >= 5U) || !K230Link_GetLatestResult(&result) ||
+      !result.valid || (result.task != K230_TASK_NUMBER) ||
+      (result.sequence == g_last_sequence) ||
+      !K230Link_IsResultFresh(1000U)) return;
+  g_last_sequence = result.sequence;
+
+  for (uint8_t i = 0U; i < result.count; ++i)
+  {
+    const K230VisionTarget *target = &result.targets[i];
+    uint8_t semantic_index;
+    if (!IsExpectedSemantic(K230_TASK_NUMBER, target->semantic)) continue;
+    semantic_index = (uint8_t)(target->semantic - K230_SEMANTIC_NUMBER_1);
+    if (g_debug_number_counts[physical_slot][semantic_index] < UINT16_MAX)
+      ++g_debug_number_counts[physical_slot][semantic_index];
+  }
+
+  current_semantic = (g_number_votes[physical_slot].candidate >=
+                      K230_SEMANTIC_NUMBER_1) ?
+                     (uint8_t)(g_number_votes[physical_slot].candidate -
+                               K230_SEMANTIC_NUMBER_1) : UINT8_MAX;
+  for (uint8_t semantic = 0U; semantic < 5U; ++semantic)
+  {
+    uint16_t count = g_debug_number_counts[physical_slot][semantic];
+    uint8_t value = (uint8_t)(K230_SEMANTIC_NUMBER_1 + semantic);
+    if (NumberSemanticUsedByOtherSlot(value, physical_slot)) continue;
+    if (count > best_count)
+    {
+      best_count = count;
+      best_semantic = semantic;
+    }
+  }
+  /* 平票时优先保留上一次已显示的领先值。 */
+  if ((current_semantic < 5U) &&
+      !NumberSemanticUsedByOtherSlot(
+          (uint8_t)(K230_SEMANTIC_NUMBER_1 + current_semantic), physical_slot) &&
+      (g_debug_number_counts[physical_slot][current_semantic] == best_count))
+    best_semantic = current_semantic;
+
+  if ((best_count != 0U) && (best_semantic < 5U))
+  {
+    g_number_votes[physical_slot].candidate =
+        (uint8_t)(K230_SEMANTIC_NUMBER_1 + best_semantic);
+    g_number_votes[physical_slot].hits =
+        (best_count > UINT8_MAX) ? UINT8_MAX : (uint8_t)best_count;
+    g_number_votes[physical_slot].confidence = 100U;
+    g_number_votes[physical_slot].stable = 1U;
+  }
+  RefreshSurveyMap();
+  RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
+}
+
+static void AcceptDebugBeanFrame(uint8_t physical_slot)
+{
+  K230VisionResult result;
+  uint16_t best_count = 0U;
+  uint8_t best_index = UINT8_MAX;
+  uint8_t current_index = UINT8_MAX;
+
+  if ((physical_slot >= 2U) || !K230Link_GetLatestResult(&result) ||
+      !result.valid || (result.task != K230_TASK_BEAN) ||
+      (result.sequence == g_last_sequence) ||
+      !K230Link_IsResultFresh(1000U)) return;
+  g_last_sequence = result.sequence;
+
+  for (uint8_t i = 0U; i < result.count; ++i)
+  {
+    uint8_t semantic = result.targets[i].semantic;
+    uint8_t index = (semantic == K230_SEMANTIC_BEAN_L) ? 0U :
+                    (semantic == K230_SEMANTIC_BEAN_H) ? 1U :
+                    (semantic == K230_SEMANTIC_BEAN_B) ? 2U : UINT8_MAX;
+    if ((index < 3U) &&
+        (g_debug_bean_counts[physical_slot][index] < UINT16_MAX))
+      ++g_debug_bean_counts[physical_slot][index];
+  }
+
+  current_index = (g_bean_votes[physical_slot].candidate ==
+                   K230_SEMANTIC_BEAN_L) ? 0U :
+                  (g_bean_votes[physical_slot].candidate ==
+                   K230_SEMANTIC_BEAN_H) ? 1U :
+                  (g_bean_votes[physical_slot].candidate ==
+                   K230_SEMANTIC_BEAN_B) ? 2U : UINT8_MAX;
+  for (uint8_t index = 0U; index < 3U; ++index)
+  {
+    uint16_t count = g_debug_bean_counts[physical_slot][index];
+    if (count > best_count)
+    {
+      best_count = count;
+      best_index = index;
+    }
+  }
+  if ((current_index < 3U) &&
+      (g_debug_bean_counts[physical_slot][current_index] == best_count))
+    best_index = current_index;
+
+  if ((best_count != 0U) && (best_index < 3U))
+  {
+    static const uint8_t semantics[3] = {
+      K230_SEMANTIC_BEAN_L, K230_SEMANTIC_BEAN_H, K230_SEMANTIC_BEAN_B
+    };
+    g_bean_votes[physical_slot].candidate = semantics[best_index];
+    g_bean_votes[physical_slot].hits =
+        (best_count > UINT8_MAX) ? UINT8_MAX : (uint8_t)best_count;
+    g_bean_votes[physical_slot].confidence = 100U;
+    g_bean_votes[physical_slot].stable = 1U;
+  }
+  RefreshSurveyMap();
+  RebuildDisplayResult(K230_TASK_BEAN, g_bean_votes, 3U);
 }
 
 static uint8_t StartLiftFromKnownBottom(void)
@@ -218,16 +447,20 @@ static void ResetResults(void)
   memset(&g_bean_display_result, 0, sizeof(g_bean_display_result));
   memset(g_number_votes, 0, sizeof(g_number_votes));
   memset(g_bean_votes, 0, sizeof(g_bean_votes));
-  memset(g_number_row_scores, 0, sizeof(g_number_row_scores));
-  memset(g_number_row_support, 0, sizeof(g_number_row_support));
-  memset(g_number_row_peak_confidence, 0,
-         sizeof(g_number_row_peak_confidence));
+  memset(g_debug_number_counts, 0, sizeof(g_debug_number_counts));
+  memset(g_debug_bean_counts, 0, sizeof(g_debug_bean_counts));
   memset(&g_survey_map, 0, sizeof(g_survey_map));
   g_result_warning = 0U;
   g_retry_active = 0U;
   g_number_retry_used = 0U;
   g_bean_retry_used = 0U;
   g_rescan_cursor = 1U;
+  g_debug_row_slot = 1U;
+  g_debug_stream_phase = DEBUG_STREAM_DONE;
+  g_debug_stream_settle_ms = 0U;
+  g_debug_stream_dwell_ms = 0U;
+  g_debug_stream_majority_slot = UINT8_MAX;
+  g_debug_stream_switch_deadline = 0U;
   g_last_sequence = 0U;
 }
 
@@ -262,18 +495,30 @@ void VisionRouteDemo_ToggleRunning(void)
     return;
   }
 
-  (void)VisionRouteDemo_StartCompetition();
+  (void)VisionRouteDemo_StartDebug();
 }
 
-uint8_t VisionRouteDemo_StartCompetition(void)
+static uint8_t StartRoute(uint8_t debug_step_scan)
 {
   if (VisionRouteDemo_IsRunning() || HasSafetyFault()) return 0U;
   StopMotion();
   ResetResults();
+  g_debug_step_scan = debug_step_scan ? 1U : 0U;
   ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_YAW_DEGREES);
   CameraTilt_SetLevel();
   EnterState(VISION_ROUTE_DEMO_LIFT_Z);
   return 1U;
+}
+
+uint8_t VisionRouteDemo_StartDebug(void)
+{
+  return StartRoute(1U);
+}
+
+uint8_t VisionRouteDemo_StartCompetition(void)
+{
+  /* 正式任务与视觉Demo使用同一条已验证链路，避免两套识别策略漂移。 */
+  return StartRoute(1U);
 }
 
 static int32_t NumberRowSlotX(uint8_t physical_slot)
@@ -308,7 +553,10 @@ static void ContinueNumberRetry(void)
   if (!g_number_votes[0].stable || !g_number_votes[4].stable)
   {
     ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_SIDE_YAW_DEGREES);
-    g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
+    if (g_debug_step_scan)
+      BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                             VISION_DEMO_RESCAN_DWELL_MS, 4U);
+    else g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
     EnterState(VISION_ROUTE_DEMO_RESCAN_NUMBER_SIDE);
     return;
   }
@@ -330,13 +578,25 @@ static void BeginNumberRetry(void)
   {
     /* 槽位齐全但语义重复时，整排和两侧全部重新投票。 */
     memset(g_number_votes, 0, sizeof(g_number_votes));
-    memset(g_number_row_scores, 0, sizeof(g_number_row_scores));
-    memset(g_number_row_support, 0, sizeof(g_number_row_support));
-    memset(g_number_row_peak_confidence, 0,
-           sizeof(g_number_row_peak_confidence));
   }
   g_rescan_cursor = 1U;
   ContinueNumberRetry();
+}
+
+static void BeginNumberRescanDwell(void)
+{
+  uint32_t now = HAL_GetTick();
+  if (g_debug_step_scan)
+  {
+    BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                           VISION_DEMO_RESCAN_DWELL_MS, g_rescan_cursor);
+  }
+  else
+  {
+    g_not_before_tick = now;
+    g_deadline = now + VISION_DEMO_RESCAN_DWELL_MS;
+  }
+  EnterState(VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL);
 }
 
 void VisionRouteDemo_Process(void)
@@ -449,58 +709,149 @@ void VisionRouteDemo_Process(void)
         CameraTilt_SetLevel();
         K230Link_InvalidateResult();
         (void)K230Link_SelectTask(K230_TASK_NUMBER);
-        g_deadline = HAL_GetTick() + VISION_DEMO_POINT_DWELL_MS;
+        if (g_debug_step_scan)
+          BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                                 VISION_DEMO_POINT_DWELL_MS, 1U);
+        else g_deadline = HAL_GetTick() + VISION_DEMO_POINT_DWELL_MS;
         EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_START);
       }
       else if (RouteExecutor_GetState() == ROUTE_EXECUTOR_FAULT) EnterFault();
       break;
 
     case VISION_ROUTE_DEMO_SCAN_NUMBER_START:
-      AcceptLatestFrame(K230_TASK_NUMBER);
-      if (DeadlineExpired())
+      if (!g_debug_step_scan)
       {
-        EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_ROW);
+        AcceptLatestFrame(K230_TASK_NUMBER);
+        if (DeadlineExpired()) EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_ROW);
+      }
+      else
+      {
+        uint8_t stream = ProcessDebugStreamWindow(K230_TASK_NUMBER);
+        if (stream == 0U) EnterFault();
+        else if (stream == 2U)
+        {
+          g_debug_row_slot = 2U;
+          EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_ROW);
+        }
       }
       break;
 
     case VISION_ROUTE_DEMO_SCAN_NUMBER_ROW:
-      AcceptLatestFrame(K230_TASK_NUMBER);
-      if (!g_stage_started)
+      if (g_debug_step_scan)
       {
         int32_t current_x = StepperAxis_GetPositionPulses(STEPPER_AXIS_X);
-        int32_t target_x = NUMBER_SLOT_BOTTOM_LEFT_X_PULSES;
-        if ((current_x >= target_x) ||
-            (StepperAxis_MovePulses(STEPPER_AXIS_X,
-             (uint32_t)(target_x - current_x), 0U) != HAL_OK)) EnterFault();
-        else
+        int32_t target_x = NumberRowSlotX(g_debug_row_slot);
+        if (g_stage_started == 0U)
         {
-          g_stage_started = 1U;
-          g_deadline = HAL_GetTick() + VISION_DEMO_X_MOVE_TIMEOUT_MS;
+          uint32_t pulses = (uint32_t)((current_x > target_x) ?
+                            current_x - target_x : target_x - current_x);
+          if ((target_x == WORLD_MAP_UNCALIBRATED) || (pulses == 0U) ||
+              (StepperAxis_MovePulses(STEPPER_AXIS_X, pulses,
+               (current_x > target_x) ? 1U : 0U) != HAL_OK)) EnterFault();
+          else
+          {
+            g_stage_started = 1U;
+            g_deadline = HAL_GetTick() + VISION_DEMO_X_MOVE_TIMEOUT_MS;
+          }
+        }
+        else if (g_stage_started == 1U)
+        {
+          if (StepperAxis_IsPulseMoveActive(STEPPER_AXIS_X))
+          {
+            if (DeadlineExpired()) EnterFault();
+            break;
+          }
+          if ((StepperAxis_GetRemainingPulses(STEPPER_AXIS_X) != 0U) ||
+              (StepperAxis_GetPositionPulses(STEPPER_AXIS_X) != target_x))
+          {
+            EnterFault();
+            break;
+          }
+          WorldMap_SetAxisPosition(target_x, 1U,
+              StepperAxis_GetPositionPulses(STEPPER_AXIS_Z), 1U);
+          BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                                 VISION_DEMO_POINT_DWELL_MS,
+                                 g_debug_row_slot);
+          g_stage_started = 2U;
+        }
+        else if (g_stage_started == 2U)
+        {
+          uint8_t stream = ProcessDebugStreamWindow(K230_TASK_NUMBER);
+          if (stream == 0U) EnterFault();
+          else if (stream == 2U)
+          {
+            if (g_debug_row_slot < 3U)
+            {
+              ++g_debug_row_slot;
+              EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_ROW);
+            }
+            else
+            {
+              ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_SIDE_YAW_DEGREES);
+              BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                                     VISION_DEMO_POINT_DWELL_MS, 4U);
+              EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE);
+            }
+          }
         }
       }
-      else if (!StepperAxis_IsPulseMoveActive(STEPPER_AXIS_X))
+      else
       {
-        if (StepperAxis_GetRemainingPulses(STEPPER_AXIS_X) != 0U) EnterFault();
-        else
+        AcceptLatestFrame(K230_TASK_NUMBER);
+        if (!g_stage_started)
         {
-          ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_SIDE_YAW_DEGREES);
-          g_deadline = HAL_GetTick() + VISION_DEMO_POINT_DWELL_MS;
-          EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE);
+          int32_t current_x = StepperAxis_GetPositionPulses(STEPPER_AXIS_X);
+          int32_t target_x = NUMBER_SLOT_BOTTOM_LEFT_X_PULSES;
+          if ((current_x >= target_x) ||
+              (StepperAxis_MovePulses(STEPPER_AXIS_X,
+               (uint32_t)(target_x - current_x), 0U) != HAL_OK)) EnterFault();
+          else
+          {
+            g_stage_started = 1U;
+            g_deadline = HAL_GetTick() + VISION_DEMO_X_MOVE_TIMEOUT_MS;
+          }
         }
+        else if (!StepperAxis_IsPulseMoveActive(STEPPER_AXIS_X))
+        {
+          if (StepperAxis_GetRemainingPulses(STEPPER_AXIS_X) != 0U) EnterFault();
+          else
+          {
+            ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_SIDE_YAW_DEGREES);
+            g_deadline = HAL_GetTick() + VISION_DEMO_POINT_DWELL_MS;
+            EnterState(VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE);
+          }
+        }
+        else if (DeadlineExpired()) EnterFault();
       }
-      else if (DeadlineExpired()) EnterFault();
       break;
 
     case VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE:
-      AcceptLatestFrame(K230_TASK_NUMBER);
-      if (DeadlineExpired())
+      if (g_debug_step_scan)
       {
-        RefreshSurveyMap();
-        if (NumberMapValid())
+        uint8_t stream = ProcessDebugStreamWindow(K230_TASK_NUMBER);
+        if (stream == 0U) EnterFault();
+        else if (stream == 2U)
         {
-          if (!StartBeanRoute()) EnterFault();
+          RefreshSurveyMap();
+          if (NumberMapValid())
+          {
+            if (!StartBeanRoute()) EnterFault();
+          }
+          else BeginNumberRetry();
         }
-        else BeginNumberRetry();
+      }
+      else
+      {
+        AcceptLatestFrame(K230_TASK_NUMBER);
+        if (DeadlineExpired())
+        {
+          RefreshSurveyMap();
+          if (NumberMapValid())
+          {
+            if (!StartBeanRoute()) EnterFault();
+          }
+          else BeginNumberRetry();
+        }
       }
       break;
 
@@ -514,8 +865,7 @@ void VisionRouteDemo_Process(void)
         ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_YAW_DEGREES);
         if (pulses == 0U)
         {
-          g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
-          EnterState(VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL);
+          BeginNumberRescanDwell();
         }
         else if (StepperAxis_MovePulses(STEPPER_AXIS_X, pulses,
                  (current_x > target_x) ? 1U : 0U) != HAL_OK) EnterFault();
@@ -532,28 +882,53 @@ void VisionRouteDemo_Process(void)
              NumberRowSlotX(g_rescan_cursor))) EnterFault();
         else
         {
-          g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
-          EnterState(VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL);
+          BeginNumberRescanDwell();
         }
       }
       else if (DeadlineExpired()) EnterFault();
       break;
 
     case VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL:
-      AcceptLatestFrame(K230_TASK_NUMBER);
-      if (DeadlineExpired())
+      if (g_debug_step_scan)
       {
-        ++g_rescan_cursor;
-        ContinueNumberRetry();
+        uint8_t stream = ProcessDebugStreamWindow(K230_TASK_NUMBER);
+        if (stream == 0U) EnterFault();
+        else if (stream == 2U)
+        {
+          ++g_rescan_cursor;
+          ContinueNumberRetry();
+        }
+      }
+      else
+      {
+        AcceptLatestFrame(K230_TASK_NUMBER);
+        if (DeadlineExpired())
+        {
+          ++g_rescan_cursor;
+          ContinueNumberRetry();
+        }
       }
       break;
 
     case VISION_ROUTE_DEMO_RESCAN_NUMBER_SIDE:
-      AcceptLatestFrame(K230_TASK_NUMBER);
-      if (DeadlineExpired())
+      if (g_debug_step_scan)
       {
-        RefreshSurveyMap();
-        if (!NumberMapValid() || !StartBeanRoute()) EnterFault();
+        uint8_t stream = ProcessDebugStreamWindow(K230_TASK_NUMBER);
+        if (stream == 0U) EnterFault();
+        else if (stream == 2U)
+        {
+          RefreshSurveyMap();
+          if (!NumberMapValid() || !StartBeanRoute()) EnterFault();
+        }
+      }
+      else
+      {
+        AcceptLatestFrame(K230_TASK_NUMBER);
+        if (DeadlineExpired())
+        {
+          RefreshSurveyMap();
+          if (!NumberMapValid() || !StartBeanRoute()) EnterFault();
+        }
       }
       break;
 
@@ -564,26 +939,62 @@ void VisionRouteDemo_Process(void)
         CameraTilt_SetDown();
         K230Link_InvalidateResult();
         (void)K230Link_SelectTask(K230_TASK_BEAN);
-        g_deadline = HAL_GetTick() + VISION_DEMO_POINT_DWELL_MS;
+        if (g_debug_step_scan)
+          BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                                 VISION_DEMO_POINT_DWELL_MS, UINT8_MAX);
+        else g_deadline = HAL_GetTick() + VISION_DEMO_POINT_DWELL_MS;
         EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_A);
       }
       else if (RouteExecutor_GetState() == ROUTE_EXECUTOR_FAULT) EnterFault();
       break;
 
     case VISION_ROUTE_DEMO_SCAN_BEAN_A:
-      AcceptLatestFrame(K230_TASK_BEAN);
-      if (DeadlineExpired())
+      if (g_debug_step_scan)
       {
-        ServoControl_SetAngle(0U, VISION_DEMO_BEAN_B_YAW_DEGREES);
-        g_deadline = HAL_GetTick() + (g_retry_active ?
-                     VISION_DEMO_RESCAN_DWELL_MS : VISION_DEMO_POINT_DWELL_MS);
-        EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_B);
+        uint8_t stream = ProcessDebugStreamWindow(K230_TASK_BEAN);
+        if (stream == 0U) EnterFault();
+        else if (stream == 2U)
+        {
+          ServoControl_SetAngle(0U, VISION_DEMO_BEAN_B_YAW_DEGREES);
+          BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+              g_retry_active ? VISION_DEMO_RESCAN_DWELL_MS :
+                               VISION_DEMO_POINT_DWELL_MS,
+              UINT8_MAX);
+          EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_B);
+        }
+      }
+      else
+      {
+        AcceptLatestFrame(K230_TASK_BEAN);
+        if (DeadlineExpired())
+        {
+          ServoControl_SetAngle(0U, VISION_DEMO_BEAN_B_YAW_DEGREES);
+          g_deadline = HAL_GetTick() + (g_retry_active ?
+                       VISION_DEMO_RESCAN_DWELL_MS : VISION_DEMO_POINT_DWELL_MS);
+          EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_B);
+        }
       }
       break;
 
     case VISION_ROUTE_DEMO_SCAN_BEAN_B:
-      AcceptLatestFrame(K230_TASK_BEAN);
-      if (DeadlineExpired())
+    {
+      uint8_t capture_done = 0U;
+      if (g_debug_step_scan)
+      {
+        uint8_t stream = ProcessDebugStreamWindow(K230_TASK_BEAN);
+        if (stream == 0U)
+        {
+          EnterFault();
+          break;
+        }
+        capture_done = (stream == 2U) ? 1U : 0U;
+      }
+      else
+      {
+        AcceptLatestFrame(K230_TASK_BEAN);
+        capture_done = DeadlineExpired();
+      }
+      if (capture_done)
       {
         RefreshSurveyMap();
         if (BeanMapValid())
@@ -601,12 +1012,16 @@ void VisionRouteDemo_Process(void)
                  sizeof(g_survey_map.bean_at_slot));
           g_survey_map.bean_valid_mask = 0U;
           ServoControl_SetAngle(0U, VISION_DEMO_BEAN_A_YAW_DEGREES);
-          g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
+          if (g_debug_step_scan)
+            BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                                   VISION_DEMO_RESCAN_DWELL_MS, UINT8_MAX);
+          else g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
           EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_A);
         }
         else EnterFault();
       }
       break;
+    }
 
     default:
       break;
@@ -643,21 +1058,16 @@ static uint32_t AbsDifference32(int32_t a, int32_t b)
 
 static void AcceptNumberSideFrame(const K230VisionResult *result)
 {
-  const K230VisionTarget *left = NULL;
-  const K230VisionTarget *right = NULL;
+  /* 路线在底部横排依次采集2/3/4，侧向姿态只采集物理5号箱。
+   * 物理1号箱不直接采集，由数字1~5唯一性在RefreshSurveyMap()中补齐。 */
   for (uint8_t i = 0U; i < result->count; ++i)
   {
     const K230VisionTarget *target = &result->targets[i];
     if (!IsExpectedSemantic(K230_TASK_NUMBER, target->semantic)) continue;
-    if ((left == NULL) || (target->center_x < left->center_x)) left = target;
-    if ((right == NULL) || (target->center_x > right->center_x)) right = target;
+    if (NumberSemanticUsedByOtherSlot(target->semantic, 4U)) continue;
+    AcceptVote(&g_number_votes[4], target->semantic, 100U);
+    break;
   }
-  if (left != NULL)
-    AcceptVote(&g_number_votes[VISION_DEMO_SIDE_LEFT_IS_NUMBER_5 ? 4U : 0U],
-               left->semantic, left->confidence_percent);
-  if ((right != NULL) && (right != left))
-    AcceptVote(&g_number_votes[VISION_DEMO_SIDE_LEFT_IS_NUMBER_5 ? 0U : 4U],
-               right->semantic, right->confidence_percent);
 }
 
 static void AcceptBeanPoseFrame(const K230VisionResult *result, uint8_t slot)
@@ -677,8 +1087,11 @@ static void AcceptBeanPoseFrame(const K230VisionResult *result, uint8_t slot)
 
 static void RefreshSurveyMap(void)
 {
+  uint8_t number_seen = 0U;
   uint8_t bean_seen = 0U;
   uint8_t missing_slot = 2U;
+  /* 物理1号从不直接采集，每次都根据2/3/4/5当前锁存结果重算。 */
+  memset(&g_number_votes[0], 0, sizeof(g_number_votes[0]));
   memset(&g_survey_map, 0, sizeof(g_survey_map));
   g_survey_map.last_sequence = g_last_sequence;
   for (uint8_t slot = 0U; slot < 5U; ++slot)
@@ -686,6 +1099,30 @@ static void RefreshSurveyMap(void)
     if (!g_number_votes[slot].stable) continue;
     g_survey_map.number_at_slot[slot] = g_number_votes[slot].candidate;
     g_survey_map.number_valid_mask |= (uint8_t)(1U << slot);
+    if ((g_number_votes[slot].candidate >= K230_SEMANTIC_NUMBER_1) &&
+        (g_number_votes[slot].candidate <= K230_SEMANTIC_NUMBER_5))
+      number_seen |= (uint8_t)(1U << (g_number_votes[slot].candidate - 1U));
+  }
+  /* 物理2/3/4/5已识别且四个数字不重复时，排除得到物理1号箱。 */
+  if (g_survey_map.number_valid_mask == 0x1EU)
+  {
+    uint8_t missing_mask = (uint8_t)(VISION_NUMBER_COMPLETE_MASK & ~number_seen);
+    if ((missing_mask != 0U) && ((missing_mask & (uint8_t)(missing_mask - 1U)) == 0U))
+    {
+      uint8_t missing_number = 1U;
+      while ((missing_mask & 0x01U) == 0U)
+      {
+        missing_mask >>= 1U;
+        ++missing_number;
+      }
+      g_number_votes[0].candidate = missing_number;
+      g_number_votes[0].hits = VISION_DEMO_STABLE_HITS;
+      g_number_votes[0].confidence = 100U;
+      g_number_votes[0].stable = 1U;
+      g_survey_map.number_at_slot[0] = missing_number;
+      g_survey_map.number_valid_mask |= 0x01U;
+      RebuildDisplayResult(K230_TASK_NUMBER, g_number_votes, 5U);
+    }
   }
   for (uint8_t slot = 0U; slot < 2U; ++slot)
   {
@@ -744,8 +1181,8 @@ static uint8_t BeanMapValid(void)
   return seen == VISION_BEAN_COMPLETE_MASK;
 }
 
-/* 横排扫描不再按单帧画面五等分。夹爪移动时先用龙门绝对X选中最近的
- * 物理2/3/4号箱，再从画面中央ROI选择质量最高的数字框做置信度累计。 */
+/* 正式连续扫描仍用龙门绝对X把字符归到物理2/3/4号箱。
+ * 新协议不含坐标和置信度，因此只对当前最近物理槽做纯次数投票。 */
 static void AcceptDynamicNumberRowFrame(const K230VisionResult *result)
 {
   static const int32_t row_x[3] = {
@@ -757,8 +1194,6 @@ static void AcceptDynamicNumberRowFrame(const K230VisionResult *result)
   int32_t gantry_x = StepperAxis_GetPositionPulses(STEPPER_AXIS_X);
   uint8_t nearest = 0U;
   uint32_t nearest_distance = AbsDifference32(gantry_x, row_x[0]);
-  const K230VisionTarget *best_target = NULL;
-  uint16_t best_quality = 0U;
 
   for (uint8_t i = 1U; i < 3U; ++i)
   {
@@ -774,62 +1209,11 @@ static void AcceptDynamicNumberRowFrame(const K230VisionResult *result)
   for (uint8_t i = 0U; i < result->count; ++i)
   {
     const K230VisionTarget *target = &result->targets[i];
-    uint32_t center_error;
-    uint16_t quality;
     if (!IsExpectedSemantic(K230_TASK_NUMBER, target->semantic)) continue;
-    center_error = (target->center_x > VISION_DEMO_ROW_CENTER_X) ?
-        (target->center_x - VISION_DEMO_ROW_CENTER_X) :
-        (VISION_DEMO_ROW_CENTER_X - target->center_x);
-    if (center_error > VISION_DEMO_ROW_ROI_HALF_WIDTH) continue;
-    quality = (uint16_t)(target->confidence_percent +
-        (VISION_DEMO_ROW_ROI_HALF_WIDTH - center_error) * 100U /
-        VISION_DEMO_ROW_ROI_HALF_WIDTH);
-    if ((best_target == NULL) || (quality > best_quality))
-    {
-      best_target = target;
-      best_quality = quality;
-    }
-  }
-  if (best_target == NULL) return;
-
-  {
-    uint8_t slot = physical_slot[nearest];
-    uint8_t semantic_index = (uint8_t)(best_target->semantic - 1U);
-    uint16_t best_score = 0U;
-    uint16_t second_score = 0U;
-    uint8_t best_semantic = 0U;
-    uint32_t accumulated = (uint32_t)g_number_row_scores[slot][semantic_index] +
-                           best_quality;
-    g_number_row_scores[slot][semantic_index] =
-        (accumulated > UINT16_MAX) ? UINT16_MAX : (uint16_t)accumulated;
-    if (g_number_row_support[slot][semantic_index] < UINT8_MAX)
-      ++g_number_row_support[slot][semantic_index];
-    if (best_target->confidence_percent >
-        g_number_row_peak_confidence[slot][semantic_index])
-      g_number_row_peak_confidence[slot][semantic_index] =
-          best_target->confidence_percent;
-
-    for (uint8_t semantic = 0U; semantic < 5U; ++semantic)
-    {
-      uint16_t score = g_number_row_scores[slot][semantic];
-      if (score > best_score)
-      {
-        second_score = best_score;
-        best_score = score;
-        best_semantic = semantic;
-      }
-      else if (score > second_score) second_score = score;
-    }
-    if ((g_number_row_support[slot][best_semantic] >= 2U) &&
-        (best_score >= VISION_DEMO_ROW_STABLE_SCORE) &&
-        (best_score >= (uint16_t)(second_score + VISION_DEMO_ROW_SCORE_MARGIN)))
-    {
-      g_number_votes[slot].candidate = (uint8_t)(best_semantic + 1U);
-      g_number_votes[slot].hits = g_number_row_support[slot][best_semantic];
-      g_number_votes[slot].confidence =
-          g_number_row_peak_confidence[slot][best_semantic];
-      g_number_votes[slot].stable = 1U;
-    }
+    if (NumberSemanticUsedByOtherSlot(target->semantic,
+                                      physical_slot[nearest])) continue;
+    AcceptVote(&g_number_votes[physical_slot[nearest]], target->semantic, 100U);
+    break;
   }
 }
 

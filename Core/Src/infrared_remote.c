@@ -639,7 +639,8 @@ void InfraredRemote_Process(void)
     return;
   }
 
-  /* 视觉页独占自动巡检Demo；运行中不允许方向键落到其他机构。 */
+  /* 视觉页待机时：1发'N'选数字，2发'B'选豆子。
+   * 自动路线运行中禁止手动切换，避免破坏当前采集窗口。 */
   if (page == UI_PAGE_VISION)
   {
     if (command == IR_REMOTE_CMD_POWER)

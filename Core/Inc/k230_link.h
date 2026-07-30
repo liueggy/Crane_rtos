@@ -25,6 +25,7 @@ typedef enum
 typedef enum
 {
   K230_SEMANTIC_UNKNOWN = 0xFF,
+  /* STM32内部继续使用紧凑语义值；串口线上接收的是ASCII '1'~'5'。 */
   K230_SEMANTIC_NUMBER_1 = 0x01,
   K230_SEMANTIC_NUMBER_2 = 0x02,
   K230_SEMANTIC_NUMBER_3 = 0x03,
@@ -38,6 +39,7 @@ typedef enum
 typedef struct
 {
   uint8_t semantic;
+  /* 简化字符协议不携带以下字段；接收层填入兼容占位值100%、(320,240)。 */
   uint8_t confidence_percent;
   uint16_t center_x;
   uint16_t center_y;
@@ -58,10 +60,12 @@ typedef struct
 typedef struct
 {
   uint32_t valid_frames;
+  /* 简化字符协议无CRC；保留字段以兼容现有诊断页，值恒为0。 */
   uint32_t crc_errors;
   uint32_t format_errors;
   uint32_t rx_overflows;
   uint32_t uart_errors;
+  /* 保留原字段名；当前统计N/B模型切换确认超时。 */
   uint32_t request_timeouts;
 } K230LinkStats;
 
@@ -82,11 +86,7 @@ void K230Link_HandleTxComplete(UART_HandleTypeDef *uart);
 void K230Link_HandleError(UART_HandleTypeDef *uart);
 void K230Link_Task(void);
 
-/* 默认任务会以5Hz发送单次请求；这些接口可供后续状态机主动控制。 */
-uint8_t K230Link_RequestOnce(uint16_t *sequence);
-uint8_t K230Link_StartStream(uint16_t *sequence);
-uint8_t K230Link_StopStream(uint16_t *sequence);
-/* 异步切换K230识别模型；实际发送和ACK处理均由K230_RX任务完成。 */
+/* 异步切换模型：发送'N'选数字、'B'选豆子，等待'n'/'b'确认。 */
 uint8_t K230Link_SelectTask(K230VisionTask task);
 K230VisionTask K230Link_GetSelectedTask(void);
 K230VisionTask K230Link_GetRequestedTask(void);
@@ -97,8 +97,6 @@ uint8_t K230Link_IsResultFresh(uint32_t maximum_age_ms);
 void K230Link_InvalidateResult(void);
 void K230Link_GetStats(K230LinkStats *stats);
 
-void K230Link_SendText(const char *text);
-uint8_t K230Link_TrySendText(const char *text);
 uint8_t K230Link_GetLatestDetection(K230Detection *detection);
 
 #endif

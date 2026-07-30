@@ -29,6 +29,9 @@ typedef enum
 void VisionRouteDemo_Init(void);
 void VisionRouteDemo_Process(void);
 void VisionRouteDemo_ToggleRunning(void);
+/* 视觉页调试入口：横排数字采用到点停车、稳定后采集。 */
+uint8_t VisionRouteDemo_StartDebug(void);
+/* 正式比赛入口：复用已完成实机调试的到点停车、多数字符锁存逻辑。 */
 uint8_t VisionRouteDemo_StartCompetition(void);
 void VisionRouteDemo_Abort(void);
 
