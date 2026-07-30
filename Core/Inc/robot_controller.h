@@ -34,6 +34,21 @@ typedef enum
 
 typedef enum
 {
+  ROBOT_FAULT_NONE = 0,
+  ROBOT_FAULT_ESTOP,
+  ROBOT_FAULT_START_POSE,
+  ROBOT_FAULT_CALIBRATION,
+  ROBOT_FAULT_VISION,
+  ROBOT_FAULT_TASK_MAP,
+  ROBOT_FAULT_NAVIGATION,
+  ROBOT_FAULT_ACTION,
+  ROBOT_FAULT_X_COORDINATE,
+  ROBOT_FAULT_Z_COORDINATE,
+  ROBOT_FAULT_FINAL_HOME
+} RobotFaultCode;
+
+typedef enum
+{
   ROBOT_CAL_MISSING_WORLD = (1UL << 0),
   ROBOT_CAL_MISSING_SURVEY = (1UL << 1),
   ROBOT_CAL_MISSING_TASK = (1UL << 2),
@@ -47,5 +62,10 @@ void RobotController_Update(void);
 RobotState RobotController_GetState(void);
 uint32_t RobotController_GetMissingCalibrationMask(void);
 const MissionTransportTask *RobotController_GetActiveTask(void);
+uint8_t RobotController_GetTaskIndex(void);
+WorldStationId RobotController_GetCurrentStation(void);
+WorldStationId RobotController_GetTargetStation(void);
+RobotFaultCode RobotController_GetFaultCode(void);
+const char *RobotController_GetPhaseText(void);
 
 #endif

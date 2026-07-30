@@ -8,11 +8,13 @@
 #include "main.h"
 
 #define CHASSIS_OPEN_LOOP_PWM 75
-#define CHASSIS_DEFAULT_RPM 110
+#define CHASSIS_DEFAULT_RPM 50
 #define CHASSIS_MIN_RPM 20
+#define CHASSIS_ALIGN_TIMEOUT_MIN_MS 100U
+#define CHASSIS_ALIGN_TIMEOUT_MAX_MS 3000U
 #define CHASSIS_MOTOR_MASK_ORIGIN 0x03U
 #define CHASSIS_MOTOR_MASK_FAR    0x0CU
-#define CHASSIS_ROUTE_ALIGN_TIMEOUT_MS 600U
+#define CHASSIS_ROUTE_ALIGN_TIMEOUT_DEFAULT_MS 1000U
 /* 路线定位以光电门为准；里程只做宽松合理性校验，不参与停车。 */
 #define CHASSIS_ROUTE_DISTANCE_MIN_PERCENT 45U
 #define CHASSIS_ROUTE_DISTANCE_MAX_PERCENT 165U
@@ -22,6 +24,7 @@ static volatile uint8_t g_running;
 static volatile uint8_t g_reverse;
 static volatile uint8_t g_closed_loop;
 static volatile int16_t g_target_rpm;
+static volatile uint16_t g_align_timeout_ms;
 static int16_t g_open_loop_command;
 static uint8_t g_applied_closed_loop;
 static uint8_t g_route_active;
@@ -37,6 +40,15 @@ static uint16_t g_route_expected_distance_mm;
 static int32_t g_route_start_count[APP_MOTOR_COUNT];
 static uint8_t g_route_target_landmarks;
 static volatile uint8_t g_passed_landmarks[2];
+
+static uint32_t ScaleRouteTimeout(uint16_t nominal_speed_rpm,
+                                  uint16_t nominal_timeout_ms)
+{
+  uint32_t scaled = ((uint32_t)nominal_timeout_ms * nominal_speed_rpm +
+                     (uint32_t)g_target_rpm - 1U) /
+                    (uint32_t)g_target_rpm;
+  return (scaled < 100U) ? 100U : scaled;
+}
 
 typedef enum
 {
@@ -145,10 +157,8 @@ static void ChassisMotion_ProcessPhotoStop(void)
       (g_passed_landmarks[0] < g_route_target_landmarks) &&
       (g_passed_landmarks[1] < g_route_target_landmarks))
   {
-    /* 同一中途地标两侧都确认后，统一清零四轮PI和斜坡；TaskStep随后
-     * 重新下发路线目标，保证四轮从0按同一斜坡重新起步。 */
-    MotorControl_Reset();
-    g_side_running_mask = CHASSIS_SIDE_ALL;
+    /* 中途地标只完成双侧计数并重新布防，不复位速度环、不撤销PWM，
+     * 保持四轮连续通过，避免每组挡板都从0重新加速造成顿挫。 */
     g_photo_trigger_mask = 0U;
     g_first_side_stop_tick = 0U;
   }
@@ -170,6 +180,7 @@ void ChassisMotion_Init(void)
   g_reverse = 0U;
   g_closed_loop = 1U;
   g_target_rpm = CHASSIS_DEFAULT_RPM;
+  g_align_timeout_ms = CHASSIS_ROUTE_ALIGN_TIMEOUT_DEFAULT_MS;
   g_open_loop_command = 0;
   g_applied_closed_loop = 1U;
   g_route_active = 0U;
@@ -306,6 +317,23 @@ int16_t ChassisMotion_GetTargetRpm(void)
   return g_target_rpm;
 }
 
+void ChassisMotion_AdjustAlignTimeout(int16_t delta_ms)
+{
+  int32_t timeout;
+  if (g_running) return;
+  timeout = (int32_t)g_align_timeout_ms + delta_ms;
+  if (timeout < CHASSIS_ALIGN_TIMEOUT_MIN_MS)
+    timeout = CHASSIS_ALIGN_TIMEOUT_MIN_MS;
+  if (timeout > CHASSIS_ALIGN_TIMEOUT_MAX_MS)
+    timeout = CHASSIS_ALIGN_TIMEOUT_MAX_MS;
+  g_align_timeout_ms = (uint16_t)timeout;
+}
+
+uint16_t ChassisMotion_GetAlignTimeoutMs(void)
+{
+  return g_align_timeout_ms;
+}
+
 void ChassisMotion_Stop(void)
 {
   g_manual_active = 0U;
@@ -345,7 +373,6 @@ uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
   g_photo_stop_enabled = 1U;
   g_manual_active = 0U;
   g_reverse = (distance_mm < 0) ? 1U : 0U;
-  g_target_rpm = (int16_t)speed_rpm;
   g_side_running_mask = CHASSIS_SIDE_ALL;
   g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
   g_photo_trigger_mask = 0U;
@@ -353,7 +380,8 @@ uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
   g_route_active = 1U;
   g_route_done = 0U;
   g_route_failed = 0U;
-  g_route_deadline_tick = HAL_GetTick() + timeout_ms;
+  g_route_deadline_tick = HAL_GetTick() +
+                          ScaleRouteTimeout(speed_rpm, timeout_ms);
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = (uint16_t)((distance_mm < 0) ?
                                             -distance_mm : distance_mm);
@@ -380,7 +408,6 @@ uint8_t ChassisMotion_StartPhotoLandmarkRoute(uint8_t reverse,
   g_photo_stop_enabled = 1U;
   g_manual_active = 0U;
   g_reverse = reverse ? 1U : 0U;
-  g_target_rpm = (int16_t)speed_rpm;
   g_side_running_mask = CHASSIS_SIDE_ALL;
   g_photo_stop_armed = (uint8_t)(CHASSIS_SIDE_ALL & (uint8_t)~blocked);
   g_photo_trigger_mask = 0U;
@@ -388,7 +415,8 @@ uint8_t ChassisMotion_StartPhotoLandmarkRoute(uint8_t reverse,
   g_route_active = 1U;
   g_route_done = 0U;
   g_route_failed = 0U;
-  g_route_deadline_tick = HAL_GetTick() + timeout_ms;
+  g_route_deadline_tick = HAL_GetTick() +
+                          ScaleRouteTimeout(speed_rpm, timeout_ms);
   g_first_side_stop_tick = 0U;
   g_route_expected_distance_mm = 0U;
   g_route_target_landmarks = landmark_count;
@@ -446,7 +474,7 @@ void ChassisMotion_TaskStep(void)
     if ((g_photo_trigger_mask != 0U) &&
         (g_photo_trigger_mask != CHASSIS_SIDE_ALL) &&
         ((uint32_t)(HAL_GetTick() - g_first_side_stop_tick) >
-         CHASSIS_ROUTE_ALIGN_TIMEOUT_MS))
+         g_align_timeout_ms))
     {
       /* 一侧已到站而另一侧长期未到，判定为挡板漏检或车架明显歪斜。 */
       g_route_active = 0U;

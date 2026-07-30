@@ -11,6 +11,7 @@
 #include "odometry_calibration.h"
 #include "photo_sensor.h"
 #include "route_executor.h"
+#include "robot_controller.h"
 #include "cmsis_os2.h"
 #include "infrared_remote.h"
 #include "initialization_debug.h"
@@ -20,6 +21,7 @@
 #include "z_calibration.h"
 #include "vision_route_demo.h"
 #include "xy_waypoint_demo.h"
+#include "world_map.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -113,6 +115,8 @@ static const char *XyWaypointDemoStateText(XyWaypointDemoState state)
     case XY_WAYPOINT_DEMO_REFERENCE: return "XZ回零";
     case XY_WAYPOINT_DEMO_READY: return "READY";
     case XY_WAYPOINT_DEMO_MOVE_Y: return "移动Y";
+    case XY_WAYPOINT_DEMO_CENTER_X_SETTLE: return "起点换边";
+    case XY_WAYPOINT_DEMO_CENTER_X_MOVE: return "起点横移";
     case XY_WAYPOINT_DEMO_X_SETTLE: return "换向等待";
     case XY_WAYPOINT_DEMO_MOVE_X: return "移动X";
     case XY_WAYPOINT_DEMO_COMPLETE: return "到达";
@@ -180,13 +184,6 @@ static const char *ControlTargetText(void)
   }
 }
 
-static const char *VisionTaskText(uint8_t task)
-{
-  if (task == K230_TASK_NUMBER) return "数字";
-  if (task == K230_TASK_BEAN) return "豆子";
-  return "--";
-}
-
 static const char *VisionRouteDemoStateText(VisionRouteDemoState state)
 {
   switch (state)
@@ -198,6 +195,9 @@ static const char *VisionRouteDemoStateText(VisionRouteDemoState state)
     case VISION_ROUTE_DEMO_SCAN_NUMBER_START:
     case VISION_ROUTE_DEMO_SCAN_NUMBER_ROW:
     case VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE: return "数字识别";
+    case VISION_ROUTE_DEMO_RESCAN_NUMBER_MOVE:
+    case VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL:
+    case VISION_ROUTE_DEMO_RESCAN_NUMBER_SIDE: return "数字补扫";
     case VISION_ROUTE_DEMO_MOVE_BEAN: return "豆子移动";
     case VISION_ROUTE_DEMO_SCAN_BEAN_A:
     case VISION_ROUTE_DEMO_SCAN_BEAN_B: return "豆子识别";
@@ -215,37 +215,6 @@ static uint8_t VisionTargetSlot(uint16_t center_x, uint8_t slot_count)
   return (uint8_t)slot;
 }
 
-static void DrawNumberVisionLayout(const K230VisionResult *vision)
-{
-  const uint8_t slot_count = 5U;
-  uint8_t values[5] = {0U};
-  uint8_t confidence[5] = {0U};
-
-  for (uint8_t i = 0U; i < vision->count; ++i)
-  {
-    const K230VisionTarget *target = &vision->targets[i];
-    if ((target->semantic < K230_SEMANTIC_NUMBER_1) ||
-        (target->semantic > K230_SEMANTIC_NUMBER_5)) continue;
-
-    uint8_t slot = VisionTargetSlot(target->center_x, slot_count);
-    if ((values[slot] == 0U) || (target->confidence_percent > confidence[slot]))
-    {
-      values[slot] = target->semantic;
-      confidence[slot] = target->confidence_percent;
-    }
-  }
-
-  for (uint8_t slot = 0U; slot < slot_count; ++slot)
-  {
-    uint8_t x = (uint8_t)(1U + slot * 25U);
-    char value[2] = {'-', '\0'};
-    if (values[slot] != 0U) value[0] = (char)('0' + values[slot]);
-    OLED_DrawRectangle(x, 21U, 23U, 27U, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString((uint8_t)(x + 8U), 29U, value, &afont16x8,
-                          OLED_COLOR_NORMAL);
-  }
-}
-
 static const char *BeanSlotText(uint8_t semantic)
 {
   switch (semantic)
@@ -257,38 +226,70 @@ static const char *BeanSlotText(uint8_t semantic)
   }
 }
 
-static void DrawBeanVisionLayout(const K230VisionResult *vision)
+static const char *RobotFaultText(RobotFaultCode fault)
 {
-  const uint8_t slot_count = 3U;
+  switch (fault)
+  {
+    case ROBOT_FAULT_ESTOP: return "急停";
+    case ROBOT_FAULT_START_POSE: return "起点姿态";
+    case ROBOT_FAULT_CALIBRATION: return "标定";
+    case ROBOT_FAULT_VISION: return "识别";
+    case ROBOT_FAULT_TASK_MAP: return "任务映射";
+    case ROBOT_FAULT_NAVIGATION: return "光电导航";
+    case ROBOT_FAULT_ACTION: return "机构动作";
+    case ROBOT_FAULT_X_COORDINATE: return "X坐标";
+    case ROBOT_FAULT_Z_COORDINATE: return "Z坐标";
+    case ROBOT_FAULT_FINAL_HOME: return "回起点";
+    case ROBOT_FAULT_NONE:
+    default: return "无";
+  }
+}
+
+static void FormatNumberVisionLine(const K230VisionResult *vision,
+                                   char *text, size_t size)
+{
+  uint8_t values[5] = {0U};
+  uint8_t confidence[5] = {0U};
+  char shown[5] = {'-', '-', '-', '-', '-'};
+  for (uint8_t i = 0U; i < vision->count; ++i)
+  {
+    const K230VisionTarget *target = &vision->targets[i];
+    if ((target->semantic < K230_SEMANTIC_NUMBER_1) ||
+        (target->semantic > K230_SEMANTIC_NUMBER_5)) continue;
+    uint8_t slot = VisionTargetSlot(target->center_x, 5U);
+    if ((values[slot] == 0U) ||
+        (target->confidence_percent > confidence[slot]))
+    {
+      values[slot] = target->semantic;
+      confidence[slot] = target->confidence_percent;
+      shown[slot] = (char)('0' + target->semantic);
+    }
+  }
+  (void)snprintf(text, size, "数:%c %c %c %c %c",
+                 shown[0], shown[1], shown[2], shown[3], shown[4]);
+}
+
+static void FormatBeanVisionLine(const K230VisionResult *vision,
+                                 char *text, size_t size)
+{
   uint8_t values[3] = {0U};
   uint8_t confidence[3] = {0U};
-
   for (uint8_t i = 0U; i < vision->count; ++i)
   {
     const K230VisionTarget *target = &vision->targets[i];
     if ((target->semantic != K230_SEMANTIC_BEAN_L) &&
         (target->semantic != K230_SEMANTIC_BEAN_H) &&
         (target->semantic != K230_SEMANTIC_BEAN_B)) continue;
-
-    uint8_t slot = VisionTargetSlot(target->center_x, slot_count);
-    if ((values[slot] == 0U) || (target->confidence_percent > confidence[slot]))
+    uint8_t slot = VisionTargetSlot(target->center_x, 3U);
+    if ((values[slot] == 0U) ||
+        (target->confidence_percent > confidence[slot]))
     {
       values[slot] = target->semantic;
       confidence[slot] = target->confidence_percent;
     }
   }
-
-  for (uint8_t slot = 0U; slot < slot_count; ++slot)
-  {
-    uint8_t x = (uint8_t)(1U + slot * 42U);
-    OLED_DrawRectangle(x, 21U, 40U, 27U, OLED_COLOR_NORMAL);
-    if (values[slot] == 0U)
-      OLED_PrintASCIIString((uint8_t)(x + 17U), 29U, "-", &afont16x8,
-                            OLED_COLOR_NORMAL);
-    else
-      OLED_PrintString((uint8_t)(x + 12U), 27U, (char *)BeanSlotText(values[slot]),
-                       &font16x16, OLED_COLOR_NORMAL);
-  }
+  (void)snprintf(text, size, "豆:%s %s %s", BeanSlotText(values[0]),
+                 BeanSlotText(values[1]), BeanSlotText(values[2]));
 }
 
 static void DrawBootFrame(uint8_t progress)
@@ -348,7 +349,6 @@ UiPage UiManager_GetPage(void)
 void UiManager_Render(void)
 {
   AppState state;
-  K230VisionResult vision;
   InfraredMotionState infrared_motion_state;
   int average_rpm;
   char line[32];
@@ -552,8 +552,9 @@ void UiManager_Render(void)
                      (unsigned)((armed_mask & 1U) ? 1U : 0U),
                      (unsigned)((armed_mask & 2U) ? 1U : 0U));
       DrawLine(32, line);
-      (void)snprintf(line, sizeof(line), "速度:%d/%d", average_rpm,
-                     (int)ChassisMotion_GetTargetRpm());
+      (void)snprintf(line, sizeof(line), "速:%d/%d 时:%u",
+                     average_rpm, (int)ChassisMotion_GetTargetRpm(),
+                     (unsigned)ChassisMotion_GetAlignTimeoutMs());
       DrawLine(48, line);
       break;
     }
@@ -602,105 +603,54 @@ void UiManager_Render(void)
     case UI_PAGE_VISION:
     {
       VisionRouteDemoState demo_state = VisionRouteDemo_GetState();
-      uint8_t demo_visible = VisionRouteDemo_IsRunning() ||
-                             (demo_state == VISION_ROUTE_DEMO_COMPLETE) ||
-                             (demo_state == VISION_ROUTE_DEMO_FAULT);
-      if (demo_visible)
-      {
-        if ((demo_state == VISION_ROUTE_DEMO_SCAN_NUMBER_START) ||
-            (demo_state == VISION_ROUTE_DEMO_SCAN_NUMBER_ROW) ||
-            (demo_state == VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE))
-        {
-          memset(&vision, 0, sizeof(vision));
-          vision.valid = 1U;
-          vision.task = K230_TASK_NUMBER;
-          (void)VisionRouteDemo_GetDisplayResult(&vision);
-          DrawHeader("数字识别");
-          DrawNumberVisionLayout(&vision);
-          (void)snprintf(line, sizeof(line), "状态:%s 数:%u",
-                         VisionRouteDemoStateText(demo_state),
-                         (unsigned)vision.count);
-          DrawLine(48, line);
-        }
-        else if ((demo_state == VISION_ROUTE_DEMO_SCAN_BEAN_A) ||
-                 (demo_state == VISION_ROUTE_DEMO_SCAN_BEAN_B) ||
-                 (demo_state == VISION_ROUTE_DEMO_COMPLETE))
-        {
-          memset(&vision, 0, sizeof(vision));
-          vision.valid = 1U;
-          vision.task = K230_TASK_BEAN;
-          (void)VisionRouteDemo_GetDisplayResult(&vision);
-          DrawHeader("豆子识别");
-          DrawBeanVisionLayout(&vision);
-          (void)snprintf(line, sizeof(line), "状态:%s%s",
-                         VisionRouteDemoStateText(demo_state),
-                         VisionRouteDemo_GetResultWarning() ? " 警告" : "");
-          DrawLine(48, line);
-        }
-        else
-        {
-          DrawHeader("视觉路线");
-          (void)snprintf(line, sizeof(line), "状态:%s",
-                         VisionRouteDemoStateText(demo_state));
-          DrawLine(16, line);
-          if ((demo_state == VISION_ROUTE_DEMO_MOVE_NUMBER) ||
-              (demo_state == VISION_ROUTE_DEMO_MOVE_BEAN))
-          {
-            (void)snprintf(line, sizeof(line), "段:%u 速度:%d",
-                           (unsigned)(RouteExecutor_GetSegmentIndex() + 1U),
-                           (int)ChassisMotion_GetTargetRpm());
-            DrawLine(32, line);
-            (void)snprintf(line, sizeof(line), "原:%u远:%u 到:%u行:%u",
-                           (unsigned)PhotoSensor_GetState(
-                               PHOTO_SENSOR_CHASSIS_ORIGIN_SIDE),
-                           (unsigned)PhotoSensor_GetState(
-                               PHOTO_SENSOR_CHASSIS_FAR_SIDE),
-                           (unsigned)ChassisMotion_GetPhotoTriggerMask(),
-                           (unsigned)ChassisMotion_GetRunningSideMask());
-            DrawLine(48, line);
-          }
-          else
-          {
-            (void)snprintf(line, sizeof(line), "X:%ld Z:%ld",
-                           (long)StepperAxis_GetPositionPulses(STEPPER_AXIS_X),
-                           (long)StepperAxis_GetPositionPulses(STEPPER_AXIS_Z));
-            DrawLine(32, line);
-            DrawLine(48, "电源:停止 0:停止");
-          }
-        }
-        break;
-      }
+      K230VisionResult number_result;
+      K230VisionResult bean_result;
+      memset(&number_result, 0, sizeof(number_result));
+      memset(&bean_result, 0, sizeof(bean_result));
+      number_result.task = K230_TASK_NUMBER;
+      bean_result.task = K230_TASK_BEAN;
+      (void)VisionRouteDemo_GetDisplayResult(&number_result);
+      (void)VisionRouteDemo_GetDisplayResult(&bean_result);
 
-      DrawHeader((K230Link_GetRequestedTask() == K230_TASK_BEAN) ?
-                 "豆子识别" : "数字识别");
-      if (K230Link_GetTaskSwitchState() == K230_TASK_SWITCH_PENDING)
-      {
-        (void)snprintf(line, sizeof(line), "任务:%s",
-                       VisionTaskText(K230Link_GetRequestedTask()));
-        DrawLine(16, line);
-        DrawLine(32, "状态:等待");
-        DrawLine(48, "按键:1数字2豆子");
-        break;
-      }
-      if (K230Link_GetTaskSwitchState() == K230_TASK_SWITCH_FAILED)
-      {
-        DrawLine(16, "状态:失败");
-        DrawLine(32, "通信:超时");
-        DrawLine(48, "按键:1数字2豆子");
-        break;
-      }
-      if (!state.k230_online || !K230Link_GetLatestResult(&vision))
-      {
-        DrawLine(16, "状态:离线");
-        DrawLine(32, "通信:超时");
-        DrawLine(48, "按键:1数字2豆子");
-        break;
-      }
+      DrawHeader("视觉识别");
+      FormatNumberVisionLine(&number_result, line, sizeof(line));
+      DrawLine(16, line);
+      FormatBeanVisionLine(&bean_result, line, sizeof(line));
+      DrawLine(32, line);
+      (void)snprintf(line, sizeof(line), "状态:%s%s",
+                     VisionRouteDemoStateText(demo_state),
+                     state.k230_online ? "" : " 离线");
+      DrawLine(48, line);
+      break;
+    }
 
-      if (vision.task == K230_TASK_BEAN) DrawBeanVisionLayout(&vision);
-      else DrawNumberVisionLayout(&vision);
-      (void)snprintf(line, sizeof(line), "在线 数:%u",
-                     (unsigned)vision.count);
+    case UI_PAGE_COMPETITION:
+    {
+      const MissionTransportTask *task = RobotController_GetActiveTask();
+      const WorldPose *pose = WorldMap_GetPose();
+      uint8_t task_index = RobotController_GetTaskIndex();
+      DrawHeader("比赛运行");
+      if (task != NULL)
+        (void)snprintf(line, sizeof(line), "任务:%u/3 %c->数字%u",
+                       (unsigned)(task_index + 1U),
+                       (char)('A' + task_index),
+                       (unsigned)task->target_number);
+      else
+        (void)snprintf(line, sizeof(line), "任务:%u/3 待识别",
+                       (unsigned)(task_index + 1U));
+      DrawLine(16, line);
+      (void)snprintf(line, sizeof(line), "阶段:%s S%u>S%u",
+                     RobotController_GetPhaseText(),
+                     (unsigned)RobotController_GetCurrentStation(),
+                     (unsigned)RobotController_GetTargetStation());
+      DrawLine(32, line);
+      if (RobotController_GetState() == ROBOT_STATE_FAULT)
+        (void)snprintf(line, sizeof(line), "故障:%s",
+                       RobotFaultText(RobotController_GetFaultCode()));
+      else
+        (void)snprintf(line, sizeof(line), "坐标:X%c Y%c Z%c PWR/0",
+                       pose->x_valid ? '+' : '-', pose->y_valid ? '+' : '-',
+                       pose->z_valid ? '+' : '-');
       DrawLine(48, line);
       break;
     }

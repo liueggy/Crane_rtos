@@ -102,6 +102,12 @@ void WorldMap_SetPoseAtStart(void);
 void WorldMap_SetKnownStation(WorldStationId station);
 void WorldMap_SetAxisPosition(int32_t x_pulses, uint8_t x_valid,
                               int32_t z_pulses, uint8_t z_valid);
+void WorldMap_InvalidateX(void);
+void WorldMap_InvalidateY(void);
+void WorldMap_InvalidateZ(void);
+void WorldMap_InvalidateAll(void);
+uint8_t WorldMap_IsTopologyTrusted(void);
+uint8_t WorldMap_IsPoseValid(void);
 
 uint8_t WorldMap_IsStartupMotionCalibrated(void);
 uint8_t WorldMap_IsSurveyCalibrated(void);

@@ -2,6 +2,7 @@
 #define VISION_ROUTE_DEMO_H
 
 #include "k230_link.h"
+#include "vision_survey.h"
 
 #include <stdint.h>
 
@@ -15,6 +16,9 @@ typedef enum
   VISION_ROUTE_DEMO_SCAN_NUMBER_START,
   VISION_ROUTE_DEMO_SCAN_NUMBER_ROW,
   VISION_ROUTE_DEMO_SCAN_NUMBER_SIDE,
+  VISION_ROUTE_DEMO_RESCAN_NUMBER_MOVE,
+  VISION_ROUTE_DEMO_RESCAN_NUMBER_DWELL,
+  VISION_ROUTE_DEMO_RESCAN_NUMBER_SIDE,
   VISION_ROUTE_DEMO_MOVE_BEAN,
   VISION_ROUTE_DEMO_SCAN_BEAN_A,
   VISION_ROUTE_DEMO_SCAN_BEAN_B,
@@ -25,11 +29,16 @@ typedef enum
 void VisionRouteDemo_Init(void);
 void VisionRouteDemo_Process(void);
 void VisionRouteDemo_ToggleRunning(void);
+uint8_t VisionRouteDemo_StartCompetition(void);
 void VisionRouteDemo_Abort(void);
 
 VisionRouteDemoState VisionRouteDemo_GetState(void);
 uint8_t VisionRouteDemo_IsRunning(void);
+/* result->task指定读取数字或豆子锁存结果；两组结果互不覆盖。 */
 uint8_t VisionRouteDemo_GetDisplayResult(K230VisionResult *result);
 uint8_t VisionRouteDemo_GetResultWarning(void);
+uint8_t VisionRouteDemo_IsComplete(void);
+uint8_t VisionRouteDemo_IsRetrying(void);
+const VisionSurveyMap *VisionRouteDemo_GetSurveyMap(void);
 
 #endif

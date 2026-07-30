@@ -28,6 +28,8 @@ uint8_t ChassisMotion_IsClosedLoop(void);
 void ChassisMotion_AdjustTargetRpm(int16_t delta_rpm);
 void ChassisMotion_SetTargetRpm(int16_t target_rpm);
 int16_t ChassisMotion_GetTargetRpm(void);
+void ChassisMotion_AdjustAlignTimeout(int16_t delta_ms);
+uint16_t ChassisMotion_GetAlignTimeoutMs(void);
 
 void ChassisMotion_Stop(void);
 /* 启动到“下一组挡板”的路线段。distance_mm只用于方向、超时和宽松
@@ -35,7 +37,7 @@ void ChassisMotion_Stop(void);
 uint8_t ChassisMotion_StartRouteSegment(int16_t distance_mm, int16_t turn_deg,
                                         uint16_t speed_rpm, uint16_t timeout_ms);
 /* 连续通过若干组Y挡板。单侧触发只锁存事件、不单边停车；两侧同组确认后：
- * 中途地标统一复位速度环后续行，目标地标四轮同时停车。 */
+ * 中途地标保持速度连续通过，目标地标四轮同时停车。 */
 uint8_t ChassisMotion_StartRouteThroughLandmarks(int16_t distance_mm,
                                                  uint8_t landmark_count,
                                                  uint16_t speed_rpm,

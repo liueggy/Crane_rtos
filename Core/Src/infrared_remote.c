@@ -11,6 +11,7 @@
 #include "k230_link.h"
 #include "odometry_calibration.h"
 #include "photo_sensor.h"
+#include "robot_controller.h"
 #include "safety_manager.h"
 #include "servo_control.h"
 #include "stepper_axis.h"
@@ -195,6 +196,7 @@ void InfraredRemote_SyncToCurrentPage(void)
   if ((UiManager_GetPage() != UI_PAGE_ODOMETRY_CALIBRATION) &&
       OdometryCalibration_IsRunning()) OdometryCalibration_Abort();
   if ((UiManager_GetPage() != UI_PAGE_VISION) &&
+      (UiManager_GetPage() != UI_PAGE_COMPETITION) &&
       (VisionRouteDemo_GetState() != VISION_ROUTE_DEMO_IDLE))
     VisionRouteDemo_Abort();
   switch (UiManager_GetPage())
@@ -206,6 +208,10 @@ void InfraredRemote_SyncToCurrentPage(void)
     case UI_PAGE_ODOMETRY_CALIBRATION:
       InfraredRemote_StopSelectedTarget();
       InfraredRemote_SelectTarget(IR_CONTROL_TARGET_CHASSIS);
+      break;
+
+    case UI_PAGE_COMPETITION:
+      InfraredRemote_StopSelectedTarget();
       break;
 
     case UI_PAGE_STEPPER:
@@ -528,6 +534,10 @@ void InfraredRemote_Process(void)
     if (UiManager_GetPage() == UI_PAGE_ODOMETRY_CALIBRATION)
       OdometryCalibration_Abort();
     if (UiManager_GetPage() == UI_PAGE_VISION) VisionRouteDemo_Abort();
+    if ((UiManager_GetPage() == UI_PAGE_COMPETITION) &&
+        (RobotController_GetState() >= ROBOT_STATE_SELF_CHECK) &&
+        (RobotController_GetState() <= ROBOT_STATE_RETURN_FINISH))
+      RobotController_RequestAbort();
     UiManager_PreviousPage();
     InfraredRemote_SyncToCurrentPage();
     return;
@@ -543,6 +553,10 @@ void InfraredRemote_Process(void)
     if (UiManager_GetPage() == UI_PAGE_ODOMETRY_CALIBRATION)
       OdometryCalibration_Abort();
     if (UiManager_GetPage() == UI_PAGE_VISION) VisionRouteDemo_Abort();
+    if ((UiManager_GetPage() == UI_PAGE_COMPETITION) &&
+        (RobotController_GetState() >= ROBOT_STATE_SELF_CHECK) &&
+        (RobotController_GetState() <= ROBOT_STATE_RETURN_FINISH))
+      RobotController_RequestAbort();
     UiManager_NextPage();
     InfraredRemote_SyncToCurrentPage();
     return;
@@ -633,9 +647,20 @@ void InfraredRemote_Process(void)
     else if (command == IR_REMOTE_CMD_0)
       VisionRouteDemo_Abort();
     else if (!VisionRouteDemo_IsRunning() && (command == IR_REMOTE_CMD_1))
+    {
       (void)K230Link_SelectTask(K230_TASK_NUMBER);
+    }
     else if (!VisionRouteDemo_IsRunning() && (command == IR_REMOTE_CMD_2))
+    {
       (void)K230Link_SelectTask(K230_TASK_BEAN);
+    }
+    return;
+  }
+
+  if (page == UI_PAGE_COMPETITION)
+  {
+    if (command == IR_REMOTE_CMD_POWER) RobotController_RequestStart();
+    else if (command == IR_REMOTE_CMD_0) RobotController_RequestAbort();
     return;
   }
 
@@ -771,6 +796,16 @@ void InfraredRemote_Process(void)
   }
   else if (page == UI_PAGE_MOTOR_SPEED)
   {
+    if (command == IR_REMOTE_CMD_4)
+    {
+      ChassisMotion_AdjustAlignTimeout(-100);
+      return;
+    }
+    if (command == IR_REMOTE_CMD_5)
+    {
+      ChassisMotion_AdjustAlignTimeout(100);
+      return;
+    }
     if (command == IR_REMOTE_CMD_6)
     {
       (void)ChassisMotion_ToggleClosedLoop();
@@ -778,18 +813,19 @@ void InfraredRemote_Process(void)
     }
     if (command == IR_REMOTE_CMD_7)
     {
-      ChassisMotion_AdjustTargetRpm(-10);
+      ChassisMotion_AdjustTargetRpm(-5);
       return;
     }
     if (command == IR_REMOTE_CMD_8)
     {
-      ChassisMotion_AdjustTargetRpm(10);
+      ChassisMotion_AdjustTargetRpm(5);
       return;
     }
   }
 
   /* 总览和系统页只用于观察。 */
   if ((page == UI_PAGE_OVERVIEW) || (page == UI_PAGE_VISION) ||
+      (page == UI_PAGE_COMPETITION) ||
       (page == UI_PAGE_SYSTEM)) return;
 
   if (command == IR_REMOTE_CMD_UP)

@@ -12,6 +12,7 @@ static WorldStation g_stations[WORLD_STATION_COUNT];
 static WorldSlotPose g_slots[WORLD_SLOT_COUNT];
 static WorldScanPose g_scans[WORLD_SCAN_COUNT];
 static WorldPose g_pose;
+static uint8_t g_topology_trusted;
 
 _Static_assert(WORLD_STATION_COUNT == WORLD_PHOTO_LANDMARK_COUNT,
                "世界地图地标数量必须与实物9组光电挡板一致");
@@ -39,6 +40,7 @@ void WorldMap_Init(void)
   memset(g_slots, 0, sizeof(g_slots));
   memset(g_scans, 0, sizeof(g_scans));
   memset(&g_pose, 0, sizeof(g_pose));
+  g_topology_trusted = 1U;
 
   for (uint8_t i = 0U; i < WORLD_STATION_COUNT; ++i)
   {
@@ -200,9 +202,10 @@ void WorldMap_SetPoseAtStart(void)
 
 void WorldMap_SetKnownStation(WorldStationId station)
 {
-  if ((station >= WORLD_STATION_COUNT) || !g_stations[station].calibrated) return;
+  if ((station >= WORLD_STATION_COUNT) || !g_topology_trusted) return;
   g_pose.station = station;
-  g_pose.y_mm = g_stations[station].world_y_mm;
+  g_pose.y_mm = g_stations[station].calibrated ?
+                g_stations[station].world_y_mm : WORLD_MAP_UNCALIBRATED;
   g_pose.y_valid = 1U;
 }
 
@@ -213,6 +216,38 @@ void WorldMap_SetAxisPosition(int32_t x_pulses, uint8_t x_valid,
   g_pose.z_pulses = z_pulses;
   g_pose.x_valid = x_valid ? 1U : 0U;
   g_pose.z_valid = z_valid ? 1U : 0U;
+}
+
+void WorldMap_InvalidateX(void)
+{
+  g_pose.x_valid = 0U;
+}
+
+void WorldMap_InvalidateY(void)
+{
+  g_pose.y_valid = 0U;
+}
+
+void WorldMap_InvalidateZ(void)
+{
+  g_pose.z_valid = 0U;
+}
+
+void WorldMap_InvalidateAll(void)
+{
+  g_pose.x_valid = 0U;
+  g_pose.y_valid = 0U;
+  g_pose.z_valid = 0U;
+}
+
+uint8_t WorldMap_IsTopologyTrusted(void)
+{
+  return g_topology_trusted;
+}
+
+uint8_t WorldMap_IsPoseValid(void)
+{
+  return g_pose.x_valid && g_pose.y_valid && g_pose.z_valid;
 }
 
 uint8_t WorldMap_IsStartupMotionCalibrated(void)

@@ -95,6 +95,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/vision_survey.c
     Core/Src/vision_route_demo.c
     Core/Src/mission_planner.c
+    Core/Src/mission_navigator.c
+    Core/Src/mission_action.c
     Core/Src/robot_routes.c
     Core/Src/route_executor.c
     Core/Src/robot_controller.c
