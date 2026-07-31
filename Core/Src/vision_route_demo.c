@@ -19,11 +19,11 @@
 
 #define VISION_DEMO_Z_TIMEOUT_MS          12000U
 #define VISION_DEMO_X_HOME_TIMEOUT_MS     22000U
-#define VISION_DEMO_X_MOVE_TIMEOUT_MS     16000U
+#define VISION_DEMO_X_MOVE_TIMEOUT_MS     18000U
 #define VISION_DEMO_POINT_DWELL_MS          1000U
 #define VISION_DEMO_POINT_SETTLE_MS          400U
 #define VISION_DEMO_RESCAN_DWELL_MS         2000U
-#define VISION_DEMO_TASK_SWITCH_TIMEOUT_MS 10000U
+#define VISION_DEMO_TASK_SWITCH_TIMEOUT_MS  2000U
 #define VISION_DEMO_DIRECTION_SETTLE_MS     300U
 #define VISION_DEMO_NUMBER_YAW_DEGREES         0U
 #define VISION_DEMO_NUMBER_SIDE_YAW_DEGREES   54U
@@ -326,10 +326,22 @@ static uint8_t ProcessDebugStreamWindow(K230VisionTask task)
   if (g_debug_stream_phase == DEBUG_STREAM_WAIT_TASK)
   {
     K230TaskSwitchState switch_state = K230Link_GetTaskSwitchState();
-    if (switch_state == K230_TASK_SWITCH_FAILED) return 0U;
+    if (switch_state == K230_TASK_SWITCH_FAILED)
+    {
+      if (!g_competition_mode) return 0U;
+      g_result_warning = 1U;
+      g_debug_stream_phase = DEBUG_STREAM_DONE;
+      return 2U;
+    }
     if ((switch_state != K230_TASK_SWITCH_IDLE) ||
         (K230Link_GetSelectedTask() != task))
-      return TimeReached(g_debug_stream_switch_deadline) ? 0U : 1U;
+    {
+      if (!TimeReached(g_debug_stream_switch_deadline)) return 1U;
+      if (!g_competition_mode) return 0U;
+      g_result_warning = 1U;
+      g_debug_stream_phase = DEBUG_STREAM_DONE;
+      return 2U;
+    }
     g_debug_stream_phase = DEBUG_STREAM_WAIT_SETTLE;
     g_not_before_tick = now + g_debug_stream_settle_ms;
     return 1U;

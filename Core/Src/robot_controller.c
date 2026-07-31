@@ -15,6 +15,8 @@
 #include "vision_route_demo.h"
 #include "world_map.h"
 
+#include <string.h>
+
 static RobotState g_state;
 static RobotFaultCode g_fault;
 static uint8_t g_task_index;
@@ -24,6 +26,28 @@ static uint8_t g_finish_stage;
 static uint8_t g_runtime_rescan_used;
 static MissionPayloadState g_payload;
 static uint32_t g_missing_calibration;
+static MissionActionFaultCode g_action_fault;
+static RobotFaultRecord g_fault_history[ROBOT_FAULT_HISTORY_SIZE];
+static uint8_t g_fault_history_head;
+static uint8_t g_fault_history_count;
+static uint8_t g_stage_retry_count;
+static uint8_t g_recovery_pending;
+static uint32_t g_recovery_deadline;
+
+static void RecordFault(RobotFaultCode fault, uint8_t retry_count,
+                        uint8_t recovered)
+{
+  RobotFaultRecord *record = &g_fault_history[g_fault_history_head];
+  record->tick_ms = HAL_GetTick();
+  record->state = g_state;
+  record->fault = fault;
+  record->action_fault = g_action_fault;
+  record->retry_count = retry_count;
+  record->recovered = recovered;
+  g_fault_history_head = (uint8_t)((g_fault_history_head + 1U) %
+                                   ROBOT_FAULT_HISTORY_SIZE);
+  if (g_fault_history_count < ROBOT_FAULT_HISTORY_SIZE) ++g_fault_history_count;
+}
 
 static void StopMotion(void)
 {
@@ -39,6 +63,13 @@ static void StopMotion(void)
 
 static void EnterState(RobotState state)
 {
+  if ((state != g_state) &&
+      !((g_state == ROBOT_STATE_TRANSPORT_VIA_CENTER) &&
+        (state == ROBOT_STATE_MOVE_TO_DROP)))
+  {
+    g_stage_retry_count = 0U;
+    g_recovery_pending = 0U;
+  }
   g_state = state;
   g_action_started = 0U;
   if (state == ROBOT_STATE_FAULT)
@@ -54,10 +85,54 @@ static void EnterState(RobotState state)
 
 static void EnterFault(RobotFaultCode fault)
 {
+  g_action_fault = (fault == ROBOT_FAULT_ACTION) ?
+                   MissionAction_GetFaultCode() : MISSION_ACTION_FAULT_NONE;
+  if ((fault == ROBOT_FAULT_ACTION) &&
+      (g_action_fault == MISSION_ACTION_FAULT_NONE) &&
+      ((SafetyManager_GetFlags() & SAFETY_FAULT_LIMIT) != 0U))
+    g_action_fault = MISSION_ACTION_FAULT_SAFETY;
+  RecordFault(fault, 0U, 0U);
   g_fault = fault;
   g_payload = MISSION_PAYLOAD_UNKNOWN;
   WorldMap_InvalidateAll();
   EnterState(ROBOT_STATE_FAULT);
+}
+
+static void RetryCurrentStage(RobotFaultCode fault)
+{
+  /* 运动中故障会使坐标或实际载荷状态不再可信，只允许对尚未启动成功的
+   * 瞬态忙/资源冲突做重试，禁止盲目重复整段导航或抓放动作。 */
+  if (!WorldMap_IsPoseValid() ||
+      ((fault == ROBOT_FAULT_NAVIGATION) &&
+       (MissionNavigator_GetState() == MISSION_NAV_FAULT)) ||
+      ((fault == ROBOT_FAULT_ACTION) &&
+       (MissionAction_GetState() == MISSION_ACTION_FAULT)))
+  {
+    EnterFault(fault);
+    return;
+  }
+
+  if (g_stage_retry_count >= 2U)
+  {
+    EnterFault(fault);
+    return;
+  }
+
+  g_action_fault = (fault == ROBOT_FAULT_ACTION) ?
+                   MissionAction_GetFaultCode() : MISSION_ACTION_FAULT_NONE;
+  ++g_stage_retry_count;
+  RecordFault(fault, g_stage_retry_count, 1U);
+  MissionNavigator_Abort();
+  MissionAction_Abort();
+  ChassisMotion_Stop();
+  StepperAxis_StopMotionPreserveZ();
+  ServoControl_CancelSlew(0U);
+  ServoControl_CancelSlew(1U);
+  g_action_started = 0U;
+  g_recovery_pending = 1U;
+  g_recovery_deadline = HAL_GetTick() + 300U;
+  if (g_state == ROBOT_STATE_MOVE_TO_DROP)
+    g_state = ROBOT_STATE_TRANSPORT_VIA_CENTER;
 }
 
 static uint32_t MissingCalibration(void)
@@ -116,6 +191,12 @@ void RobotController_Init(void)
   g_runtime_rescan_used = 0U;
   g_payload = MISSION_PAYLOAD_EMPTY;
   g_fault = ROBOT_FAULT_NONE;
+  g_action_fault = MISSION_ACTION_FAULT_NONE;
+  memset(g_fault_history, 0, sizeof(g_fault_history));
+  g_fault_history_head = 0U;
+  g_fault_history_count = 0U;
+  g_stage_retry_count = 0U;
+  g_recovery_pending = 0U;
   g_missing_calibration = MissingCalibration();
   EnterState(ROBOT_STATE_IDLE);
 }
@@ -154,6 +235,12 @@ void RobotController_Update(void)
       EnterFault(SafetyManager_IsEstopActive() ?
                  ROBOT_FAULT_ESTOP : ROBOT_FAULT_ACTION);
     return;
+  }
+
+  if (g_recovery_pending)
+  {
+    if ((int32_t)(HAL_GetTick() - g_recovery_deadline) < 0) return;
+    g_recovery_pending = 0U;
   }
 
   switch (g_state)
@@ -198,9 +285,13 @@ void RobotController_Update(void)
         EnterFault(ROBOT_FAULT_TASK_MAP);
       else if (MissionPlanner_HasCompleteThreeTasks() &&
                (MissionPlanner_GetTaskCount() == MISSION_TRANSPORT_TASK_COUNT))
+      {
+        if (MissionPlanner_GetIssue() != MISSION_PLAN_OK)
+          RecordFault(ROBOT_FAULT_TASK_MAP, 0U, 1U);
         EnterState(ROBOT_STATE_PREPARE_PICK);
+      }
       else
-        /* 三种豆类或数字1/2/3仍不唯一时，必须在第一次抓取前停止。 */
+        /* 仅保留结构损坏类兜底；普通缺识别已由规划器唯一补全。 */
         EnterFault(ROBOT_FAULT_TASK_MAP);
       break;
 
@@ -224,12 +315,12 @@ void RobotController_Update(void)
       {
         g_action_started = MissionNavigator_StartWithPayload(
             task->pickup_slot, g_payload);
-        if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
+        if (!g_action_started) RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       }
       else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
         EnterState(ROBOT_STATE_PICK_ACTION);
       else if (MissionNavigator_GetState() == MISSION_NAV_FAULT)
-        EnterFault(ROBOT_FAULT_NAVIGATION);
+        RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       break;
 
     case ROBOT_STATE_PICK_ACTION:
@@ -238,7 +329,7 @@ void RobotController_Update(void)
       else if (!g_action_started)
       {
         g_action_started = MissionAction_StartPickup(task->pickup_slot);
-        if (!g_action_started) EnterFault(ROBOT_FAULT_ACTION);
+        if (!g_action_started) RetryCurrentStage(ROBOT_FAULT_ACTION);
       }
       else if (MissionAction_GetState() == MISSION_ACTION_DONE)
       {
@@ -256,7 +347,7 @@ void RobotController_Update(void)
         }
       }
       else if (MissionAction_GetState() == MISSION_ACTION_FAULT)
-        EnterFault(ROBOT_FAULT_ACTION);
+        RetryCurrentStage(ROBOT_FAULT_ACTION);
       break;
 
     case ROBOT_STATE_LIFT_SAFE:
@@ -273,7 +364,7 @@ void RobotController_Update(void)
         EnterFault(ROBOT_FAULT_ACTION);
       else if (!MissionNavigator_StartWithPayload(
                    task->drop_slot, g_payload))
-        EnterFault(ROBOT_FAULT_NAVIGATION);
+        RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       else EnterState(ROBOT_STATE_MOVE_TO_DROP);
       break;
 
@@ -281,7 +372,7 @@ void RobotController_Update(void)
       if (MissionNavigator_GetState() == MISSION_NAV_DONE)
         EnterState(ROBOT_STATE_DROP_ACTION);
       else if (MissionNavigator_GetState() == MISSION_NAV_FAULT)
-        EnterFault(ROBOT_FAULT_NAVIGATION);
+        RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       break;
 
     case ROBOT_STATE_DROP_ACTION:
@@ -290,7 +381,7 @@ void RobotController_Update(void)
       else if (!g_action_started)
       {
         g_action_started = MissionAction_StartDrop(task->drop_slot);
-        if (!g_action_started) EnterFault(ROBOT_FAULT_ACTION);
+        if (!g_action_started) RetryCurrentStage(ROBOT_FAULT_ACTION);
       }
       else if (MissionAction_GetState() == MISSION_ACTION_DONE)
       {
@@ -325,7 +416,7 @@ void RobotController_Update(void)
         }
       }
       else if (MissionAction_GetState() == MISSION_ACTION_FAULT)
-        EnterFault(ROBOT_FAULT_ACTION);
+        RetryCurrentStage(ROBOT_FAULT_ACTION);
       break;
 
     case ROBOT_STATE_RETURN_TO_BEAN_RESCAN:
@@ -337,7 +428,7 @@ void RobotController_Update(void)
             WORLD_STATION_UPPER_OBSTACLE_BEAN_SCAN,
             StepperAxis_GetPositionPulses(STEPPER_AXIS_X),
             g_payload);
-        if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
+        if (!g_action_started) RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       }
       else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
       {
@@ -345,7 +436,7 @@ void RobotController_Update(void)
         else EnterState(ROBOT_STATE_BEAN_RESCAN);
       }
       else if (MissionNavigator_GetState() == MISSION_NAV_FAULT)
-        EnterFault(ROBOT_FAULT_NAVIGATION);
+        RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       break;
 
     case ROBOT_STATE_BEAN_RESCAN:
@@ -379,12 +470,12 @@ void RobotController_Update(void)
       {
         g_action_started = MissionNavigator_StartWithPayload(
             task->pickup_slot, g_payload);
-        if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
+        if (!g_action_started) RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       }
       else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
         EnterState(ROBOT_STATE_PICK_ACTION);
       else if (MissionNavigator_GetState() == MISSION_NAV_FAULT)
-        EnterFault(ROBOT_FAULT_NAVIGATION);
+        RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       break;
 
     case ROBOT_STATE_RETURN_FINISH:
@@ -397,7 +488,7 @@ void RobotController_Update(void)
           g_action_started = MissionNavigator_StartStationWithPayload(
               WORLD_STATION_START, (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U),
               g_payload);
-          if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
+          if (!g_action_started) RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
         }
         else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
         {
@@ -405,7 +496,7 @@ void RobotController_Update(void)
           g_action_started = 0U;
         }
         else if (MissionNavigator_GetState() == MISSION_NAV_FAULT)
-          EnterFault(ROBOT_FAULT_NAVIGATION);
+          RetryCurrentStage(ROBOT_FAULT_NAVIGATION);
       }
       else if (g_finish_stage == 1U)
       {
@@ -554,13 +645,34 @@ RobotFaultCode RobotController_GetFaultCode(void)
 
 MissionActionFaultCode RobotController_GetActionFaultCode(void)
 {
-  return MissionAction_GetFaultCode();
+  return (g_state == ROBOT_STATE_FAULT) ? g_action_fault :
+         MissionAction_GetFaultCode();
 }
+
+uint8_t RobotController_GetFaultRecordCount(void)
+{
+  return g_fault_history_count;
+}
+
+uint8_t RobotController_GetFaultRecord(uint8_t newest_index,
+                                       RobotFaultRecord *record)
+{
+  uint8_t slot;
+  if ((record == 0) || (newest_index >= g_fault_history_count)) return 0U;
+  slot = (uint8_t)((g_fault_history_head + ROBOT_FAULT_HISTORY_SIZE - 1U -
+                    newest_index) % ROBOT_FAULT_HISTORY_SIZE);
+  *record = g_fault_history[slot];
+  return 1U;
+}
+
+uint8_t RobotController_IsRecovering(void) { return g_recovery_pending; }
+uint8_t RobotController_GetRetryCount(void) { return g_stage_retry_count; }
 
 const char *RobotController_GetPhaseText(void)
 {
   ChassisAlignmentState alignment = ChassisMotion_GetAlignmentState();
   MissionNavigatorCrossPhase cross_phase = MissionNavigator_GetCrossPhase();
+  if (g_recovery_pending) return "自动恢复";
   if ((g_state == ROBOT_STATE_DROP_ACTION) &&
       ServoControl_IsSlewActive(0U)) return "SERVO50";
   if (MissionNavigator_GetState() == MISSION_NAV_PREALIGN_X)

@@ -458,6 +458,7 @@ void InfraredRemote_Process(void)
   uint8_t safety_fault;
   uint32_t primask;
   UiPage page;
+  RobotState robot_state;
 
   /* 丢边沿会破坏软件交替捕获的极性；空闲超时后强制回到下降沿起始态。 */
   if ((g_capture_started != 0U) &&
@@ -521,10 +522,13 @@ void InfraredRemote_Process(void)
 
   g_last_command = command;
   Buzzer_Beep(IR_KEY_BEEP_DURATION_MS);
+  robot_state = RobotController_GetState();
 
   /* 页面浏览不产生运动，即使故障锁定也允许查看诊断信息。 */
   if (command == IR_REMOTE_CMD_VOL_MINUS)
   {
+    if ((robot_state >= ROBOT_STATE_SELF_CHECK) &&
+        (robot_state < ROBOT_STATE_FINISHED)) return;
     if (UiManager_GetPage() == UI_PAGE_DROP_DEMO) DropDemo_Abort();
     if (UiManager_GetPage() == UI_PAGE_BEAN_PICKUP_DEMO) BeanPickupDemo_Abort();
     if (UiManager_GetPage() == UI_PAGE_BEAN_SEQUENCE_DEMO) BeanSequenceDemo_Abort();
@@ -544,6 +548,8 @@ void InfraredRemote_Process(void)
   }
   if (command == IR_REMOTE_CMD_VOL_PLUS)
   {
+    if ((robot_state >= ROBOT_STATE_SELF_CHECK) &&
+        (robot_state < ROBOT_STATE_FINISHED)) return;
     if (UiManager_GetPage() == UI_PAGE_DROP_DEMO) DropDemo_Abort();
     if (UiManager_GetPage() == UI_PAGE_BEAN_PICKUP_DEMO) BeanPickupDemo_Abort();
     if (UiManager_GetPage() == UI_PAGE_BEAN_SEQUENCE_DEMO) BeanSequenceDemo_Abort();
@@ -563,6 +569,10 @@ void InfraredRemote_Process(void)
   }
 
   page = UiManager_GetPage();
+
+  /* 正式比赛启动后遥控器仅保留响应提示，不允许修改执行状态。 */
+  if ((robot_state >= ROBOT_STATE_SELF_CHECK) &&
+      (robot_state < ROBOT_STATE_FINISHED)) return;
 
   /* 故障状态只确认收到按键，不执行任何电机动作。 */
   if (safety_fault != 0U) return;
@@ -661,7 +671,13 @@ void InfraredRemote_Process(void)
   if (page == UI_PAGE_COMPETITION)
   {
     if (command == IR_REMOTE_CMD_POWER) RobotController_RequestStart();
-    else if (command == IR_REMOTE_CMD_0) RobotController_RequestAbort();
+    return;
+  }
+
+  if (page == UI_PAGE_SYSTEM)
+  {
+    if (command == IR_REMOTE_CMD_LEFT) UiManager_FaultPrevious();
+    else if (command == IR_REMOTE_CMD_RIGHT) UiManager_FaultNext();
     return;
   }
 

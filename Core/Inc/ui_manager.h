@@ -33,5 +33,7 @@ void UiManager_PreviousPage(void);
 void UiManager_SetPage(UiPage page);
 UiPage UiManager_GetPage(void);
 void UiManager_Render(void);
+void UiManager_FaultNext(void);
+void UiManager_FaultPrevious(void);
 
 #endif

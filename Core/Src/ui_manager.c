@@ -29,7 +29,29 @@
 #define K230_DISPLAY_WIDTH 640U
 
 /* 当前页面只保存页面编号，具体内容由 Render 根据状态快照绘制。 */
-static UiPage g_page = UI_PAGE_OVERVIEW;
+static UiPage g_page = UI_PAGE_COMPETITION;
+static const UiPage g_competition_pages[] = {
+  UI_PAGE_COMPETITION,
+  UI_PAGE_INITIALIZATION_DEBUG,
+  UI_PAGE_MOTOR_SPEED,
+  UI_PAGE_VISION,
+  UI_PAGE_SYSTEM,
+};
+static uint8_t g_fault_view_index;
+
+static uint8_t CompetitionPageIndex(UiPage page)
+{
+  for (uint8_t i = 0U; i < (uint8_t)(sizeof(g_competition_pages) /
+                                      sizeof(g_competition_pages[0])); ++i)
+    if (g_competition_pages[i] == page) return i;
+  return 0U;
+}
+
+static uint8_t CompetitionIsRunning(void)
+{
+  RobotState state = RobotController_GetState();
+  return (state >= ROBOT_STATE_SELF_CHECK) && (state < ROBOT_STATE_FINISHED);
+}
 
 static void UiDelay(uint32_t delay_ms)
 {
@@ -179,9 +201,11 @@ static void DrawLine(uint8_t y, const char *text)
 static void DrawHeader(const char *title)
 {
   char page[8];
+  uint8_t index = CompetitionPageIndex(g_page);
   OLED_PrintString(0, 0, (char *)title, &font16x16, OLED_COLOR_NORMAL);
-  (void)snprintf(page, sizeof(page), "%u/%u", (unsigned)(g_page + 1U),
-                 (unsigned)UI_PAGE_COUNT);
+  (void)snprintf(page, sizeof(page), "%u/%u", (unsigned)(index + 1U),
+                 (unsigned)(sizeof(g_competition_pages) /
+                            sizeof(g_competition_pages[0])));
   OLED_PrintASCIIString(96, 0, page, &afont12x6, OLED_COLOR_NORMAL);
 }
 
@@ -398,18 +422,26 @@ void UiManager_Init(I2C_HandleTypeDef *i2c)
 {
   OLED_Init(i2c, OLED_I2C_ADDRESS);
   PlayBootAnimation();
-  UiManager_SetPage(UI_PAGE_OVERVIEW);
+  UiManager_SetPage(UI_PAGE_COMPETITION);
 }
 
 void UiManager_NextPage(void)
 {
-  UiManager_SetPage((UiPage)((g_page + 1U) % UI_PAGE_COUNT));
+  uint8_t count = (uint8_t)(sizeof(g_competition_pages) /
+                            sizeof(g_competition_pages[0]));
+  uint8_t index = CompetitionPageIndex(g_page);
+  if (CompetitionIsRunning()) return;
+  UiManager_SetPage(g_competition_pages[(uint8_t)((index + 1U) % count)]);
 }
 
 void UiManager_PreviousPage(void)
 {
-  UiManager_SetPage((g_page == UI_PAGE_OVERVIEW) ?
-                    (UiPage)(UI_PAGE_COUNT - 1U) : (UiPage)(g_page - 1U));
+  uint8_t count = (uint8_t)(sizeof(g_competition_pages) /
+                            sizeof(g_competition_pages[0]));
+  uint8_t index = CompetitionPageIndex(g_page);
+  if (CompetitionIsRunning()) return;
+  UiManager_SetPage(g_competition_pages[(index == 0U) ?
+                    (uint8_t)(count - 1U) : (uint8_t)(index - 1U)]);
 }
 
 void UiManager_SetPage(UiPage page)
@@ -417,6 +449,18 @@ void UiManager_SetPage(UiPage page)
   if (page >= UI_PAGE_COUNT) page = UI_PAGE_OVERVIEW;
   g_page = page;
   AppState_SetUiPage((uint8_t)page);
+}
+
+void UiManager_FaultNext(void)
+{
+  uint8_t count = RobotController_GetFaultRecordCount();
+  if ((count > 0U) && ((uint8_t)(g_fault_view_index + 1U) < count))
+    ++g_fault_view_index;
+}
+
+void UiManager_FaultPrevious(void)
+{
+  if (g_fault_view_index > 0U) --g_fault_view_index;
 }
 
 UiPage UiManager_GetPage(void)
@@ -618,7 +662,7 @@ void UiManager_Render(void)
     {
       uint8_t side_mask = ChassisMotion_GetRunningSideMask();
       uint8_t armed_mask = ChassisMotion_IsPhotoStopArmed();
-      DrawHeader("底盘控制");
+      DrawHeader("底盘调节");
       average_rpm = (RoundedInt(state.measured_rpm[0]) +
                      RoundedInt(state.measured_rpm[1]) +
                      RoundedInt(state.measured_rpm[2]) +
@@ -694,7 +738,7 @@ void UiManager_Render(void)
       number_result.task = K230_TASK_NUMBER;
       bean_result.task = K230_TASK_BEAN;
 
-      DrawHeader("视觉识别");
+      DrawHeader("静态视觉");
       if (demo_state == VISION_ROUTE_DEMO_IDLE)
       {
         K230TaskSwitchState switch_state = K230Link_GetTaskSwitchState();
@@ -750,12 +794,36 @@ void UiManager_Render(void)
       uint8_t task_index = RobotController_GetTaskIndex();
       uint8_t task_count = RobotController_GetTaskCount();
       DrawHeader("比赛运行");
+      if ((RobotController_GetState() == ROBOT_STATE_MOVE_TO_NUMBER_SCAN) ||
+          (RobotController_GetState() == ROBOT_STATE_NUMBER_SCAN_A) ||
+          (RobotController_GetState() == ROBOT_STATE_NUMBER_SCAN_B) ||
+          (RobotController_GetState() == ROBOT_STATE_MOVE_TO_BEAN_SCAN) ||
+          (RobotController_GetState() == ROBOT_STATE_BEAN_SCAN_C) ||
+          (RobotController_GetState() == ROBOT_STATE_TASK_BUILD))
+      {
+        K230VisionResult number_result = {.task = K230_TASK_NUMBER};
+        K230VisionResult bean_result = {.task = K230_TASK_BEAN};
+        (void)snprintf(line, sizeof(line), "阶段:%s S%u>S%u",
+                       RobotController_GetPhaseText(),
+                       (unsigned)RobotController_GetCurrentStation(),
+                       (unsigned)RobotController_GetTargetStation());
+        DrawLine(16, line);
+        (void)VisionRouteDemo_GetDisplayResult(&number_result);
+        (void)VisionRouteDemo_GetDisplayResult(&bean_result);
+        FormatNumberVisionLine(&number_result, line, sizeof(line));
+        DrawLine(32, line);
+        FormatBeanVisionLine(&bean_result, line, sizeof(line));
+        DrawLine(48, line);
+        break;
+      }
       if (task != NULL)
-        (void)snprintf(line, sizeof(line), "任务:%u/%u %c->数字%u",
+        (void)snprintf(line, sizeof(line), "任务:%u/%u %c>%u %s",
                        (unsigned)(task_index + 1U),
                        (unsigned)task_count,
                        (char)('A' + task->physical_bean_slot),
-                       (unsigned)task->target_number);
+                       (unsigned)task->target_number,
+                       (task->bean_inferred || task->drop_inferred) ?
+                       "推定" : "可靠");
       else
         (void)snprintf(line, sizeof(line), "任务:0/%u 跳:%X",
                        (unsigned)task_count,
@@ -803,12 +871,34 @@ void UiManager_Render(void)
     }
 
     case UI_PAGE_SYSTEM:
-      DrawHeader("系统状态");
-      DrawLine(16, state.estop_active ? "急停:触发" : "急停:正常");
-      DrawLine(32, state.k230_online ? "视觉:在线" : "视觉:离线");
-      (void)snprintf(line, sizeof(line), "故障:%08lX", (unsigned long)state.fault_flags);
-      DrawLine(48, line);
+    {
+      RobotFaultRecord record;
+      uint8_t count = RobotController_GetFaultRecordCount();
+      DrawHeader("故障查询");
+      if (!RobotController_GetFaultRecord(g_fault_view_index, &record))
+      {
+        DrawLine(16, "无历史记录");
+        DrawLine(32, state.k230_online ? "通讯:正常" : "通讯:离线");
+        DrawLine(48, state.estop_active ? "安全:急停" : "安全:正常");
+      }
+      else
+      {
+        (void)snprintf(line, sizeof(line), "记录:%u/%u %s",
+                       (unsigned)(g_fault_view_index + 1U), (unsigned)count,
+                       record.recovered ?
+                       ((record.fault == ROBOT_FAULT_TASK_MAP) ?
+                        "已降级" : "已重试") : "终止");
+        DrawLine(16, line);
+        (void)snprintf(line, sizeof(line), "故障:%s A:%s",
+                       RobotFaultText(record.fault),
+                       ActionFaultText(record.action_fault));
+        DrawLine(32, line);
+        (void)snprintf(line, sizeof(line), "阶段:%u 次:%u",
+                       (unsigned)record.state, (unsigned)record.retry_count);
+        DrawLine(48, line);
+      }
       break;
+    }
 
     case UI_PAGE_OVERVIEW:
     default:

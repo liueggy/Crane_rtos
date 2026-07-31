@@ -34,6 +34,8 @@ typedef struct
   WorldSlotId pickup_slot;
   uint8_t target_number;
   WorldSlotId drop_slot;
+  uint8_t bean_inferred;
+  uint8_t drop_inferred;
 } MissionTransportTask;
 
 void MissionPlanner_Init(void);
@@ -48,6 +50,8 @@ uint8_t MissionPlanner_GetCompletedBeanMask(void);
 uint8_t MissionPlanner_HasCompleteThreeTasks(void);
 MissionPlanIssue MissionPlanner_GetIssue(void);
 uint8_t MissionPlanner_GetIssueMask(void);
+uint8_t MissionPlanner_GetInferredBeanMask(void);
+uint8_t MissionPlanner_GetInferredNumberMask(void);
 MissionTaskSkipReason MissionPlanner_GetSkipReason(uint8_t physical_bean_slot);
 void MissionPlanner_MarkTaskCompleted(uint8_t index);
 

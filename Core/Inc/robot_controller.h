@@ -59,6 +59,18 @@ typedef enum
   ROBOT_CAL_MISSING_ROUTES = (1UL << 3)
 } RobotCalibrationFlag;
 
+#define ROBOT_FAULT_HISTORY_SIZE 8U
+
+typedef struct
+{
+  uint32_t tick_ms;
+  RobotState state;
+  RobotFaultCode fault;
+  MissionActionFaultCode action_fault;
+  uint8_t retry_count;
+  uint8_t recovered;
+} RobotFaultRecord;
+
 void RobotController_Init(void);
 void RobotController_RequestStart(void);
 void RobotController_RequestAbort(void);
@@ -79,5 +91,10 @@ WorldStationId RobotController_GetTargetStation(void);
 RobotFaultCode RobotController_GetFaultCode(void);
 MissionActionFaultCode RobotController_GetActionFaultCode(void);
 const char *RobotController_GetPhaseText(void);
+uint8_t RobotController_GetFaultRecordCount(void);
+uint8_t RobotController_GetFaultRecord(uint8_t newest_index,
+                                       RobotFaultRecord *record);
+uint8_t RobotController_IsRecovering(void);
+uint8_t RobotController_GetRetryCount(void);
 
 #endif

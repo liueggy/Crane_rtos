@@ -12,7 +12,7 @@
 #define K230_RX_DMA_SIZE               128U
 #define K230_RX_RING_SIZE              512U
 #define K230_EVENT_RX_DATA             (1UL << 0)
-#define K230_TASK_SWITCH_TIMEOUT_MS    10000U
+#define K230_TASK_SWITCH_TIMEOUT_MS     2000U
 #define K230_COMPAT_CONFIDENCE_PERCENT 100U
 #define K230_COMPAT_CENTER_X           320U
 #define K230_COMPAT_CENTER_Y           240U
