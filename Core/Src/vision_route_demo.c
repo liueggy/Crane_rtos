@@ -4,6 +4,8 @@
 #include "camera_tilt.h"
 #include "chassis_motion.h"
 #include "initialization_debug.h"
+#include "mission_action.h"
+#include "mission_navigator.h"
 #include "odometry_calibration.h"
 #include "photo_sensor.h"
 #include "robot_controller.h"
@@ -53,6 +55,7 @@ static VisionRouteDemoState g_state;
 static uint8_t g_stage_started;
 static uint8_t g_result_warning;
 static uint8_t g_debug_step_scan;
+static uint8_t g_competition_mode;
 static uint8_t g_retry_active;
 static uint8_t g_number_retry_used;
 static uint8_t g_bean_retry_used;
@@ -86,6 +89,27 @@ static uint8_t NumberSemanticUsedByOtherSlot(uint8_t semantic,
                                              uint8_t physical_slot);
 static uint8_t NumberMapValid(void);
 static uint8_t BeanMapValid(void);
+static void BeginNumberRetry(void);
+
+static void InvalidateDuplicateVotes(VisionSlotVote *votes, uint8_t count)
+{
+  for (uint8_t left = 0U; left < count; ++left)
+  {
+    if (!votes[left].stable) continue;
+    for (uint8_t right = (uint8_t)(left + 1U); right < count; ++right)
+    {
+      if (!votes[right].stable ||
+          (votes[left].candidate != votes[right].candidate)) continue;
+      if (votes[left].hits > votes[right].hits) votes[right].stable = 0U;
+      else if (votes[right].hits > votes[left].hits) votes[left].stable = 0U;
+      else
+      {
+        votes[left].stable = 0U;
+        votes[right].stable = 0U;
+      }
+    }
+  }
+}
 
 static uint8_t DeadlineExpired(void)
 {
@@ -106,6 +130,8 @@ static uint8_t HasSafetyFault(void)
 static void StopMotion(void)
 {
   RouteExecutor_Abort();
+  MissionNavigator_Abort();
+  MissionAction_Abort();
   ChassisMotion_Stop();
   StepperAxis_SetEnabled(STEPPER_AXIS_X, 0U);
   StepperAxis_SetEnabled(STEPPER_AXIS_Z, 0U);
@@ -175,6 +201,37 @@ static void AcceptVote(VisionSlotVote *vote, uint8_t semantic,
     vote->confidence = confidence;
   }
   if (vote->hits >= VISION_DEMO_STABLE_HITS) vote->stable = 1U;
+}
+
+/* 0失败，1已启动/仍在运行，2已经位于目标。 */
+static uint8_t MoveAxisTo(StepperAxisId axis, int32_t target)
+{
+  int32_t current = StepperAxis_GetPositionPulses(axis);
+  uint32_t pulses;
+  if (StepperAxis_IsPulseMoveActive(axis)) return 1U;
+  if (current == target) return 2U;
+  if ((target < 0) ||
+      ((axis == STEPPER_AXIS_X) &&
+       (target > (int32_t)STEPPER_X_TRAVEL_PULSES)) ||
+      ((axis == STEPPER_AXIS_Z) &&
+       (target > (int32_t)STEPPER_Z_TRAVEL_PULSES))) return 0U;
+  pulses = (uint32_t)((current > target) ? current - target : target - current);
+  return (StepperAxis_MovePulses(axis, pulses,
+          (current > target) ? 1U : 0U) == HAL_OK) ? 1U : 0U;
+}
+
+static uint8_t AxisReached(StepperAxisId axis, int32_t target)
+{
+  return !StepperAxis_IsPulseMoveActive(axis) &&
+         (StepperAxis_GetRemainingPulses(axis) == 0U) &&
+         (StepperAxis_GetPositionPulses(axis) == target);
+}
+
+static void FinishBeanScan(void)
+{
+  g_retry_active = 0U;
+  if (g_competition_mode) EnterState(VISION_ROUTE_DEMO_COMPLETE);
+  else EnterState(VISION_ROUTE_DEMO_POST_PREPARE);
 }
 
 static uint8_t NumberSemanticUsedByOtherSlot(uint8_t semantic,
@@ -283,9 +340,15 @@ static uint8_t ProcessDebugStreamWindow(K230VisionTask task)
     K230Link_InvalidateResult();
     if ((task == K230_TASK_NUMBER) &&
         (g_debug_stream_majority_slot < 5U))
-      ResetDebugNumberSlot(g_debug_stream_majority_slot);
+    {
+      if (!(g_competition_mode && g_retry_active))
+        ResetDebugNumberSlot(g_debug_stream_majority_slot);
+    }
     else if (task == K230_TASK_BEAN)
-      ResetDebugBeanSlot((g_state == VISION_ROUTE_DEMO_SCAN_BEAN_A) ? 0U : 1U);
+    {
+      if (!(g_competition_mode && g_retry_active))
+        ResetDebugBeanSlot((g_state == VISION_ROUTE_DEMO_SCAN_BEAN_A) ? 0U : 1U);
+    }
     g_debug_stream_phase = DEBUG_STREAM_ACQUIRE;
     g_deadline = now + g_debug_stream_dwell_ms;
     return 1U;
@@ -452,6 +515,7 @@ static void ResetResults(void)
   memset(&g_survey_map, 0, sizeof(g_survey_map));
   g_result_warning = 0U;
   g_retry_active = 0U;
+  g_competition_mode = 0U;
   g_number_retry_used = 0U;
   g_bean_retry_used = 0U;
   g_rescan_cursor = 1U;
@@ -498,12 +562,13 @@ void VisionRouteDemo_ToggleRunning(void)
   (void)VisionRouteDemo_StartDebug();
 }
 
-static uint8_t StartRoute(uint8_t debug_step_scan)
+static uint8_t StartRoute(uint8_t debug_step_scan, uint8_t competition_mode)
 {
   if (VisionRouteDemo_IsRunning() || HasSafetyFault()) return 0U;
   StopMotion();
   ResetResults();
   g_debug_step_scan = debug_step_scan ? 1U : 0U;
+  g_competition_mode = competition_mode ? 1U : 0U;
   ServoControl_SetAngle(0U, VISION_DEMO_NUMBER_YAW_DEGREES);
   CameraTilt_SetLevel();
   EnterState(VISION_ROUTE_DEMO_LIFT_Z);
@@ -512,13 +577,35 @@ static uint8_t StartRoute(uint8_t debug_step_scan)
 
 uint8_t VisionRouteDemo_StartDebug(void)
 {
-  return StartRoute(1U);
+  return StartRoute(1U, 0U);
 }
 
 uint8_t VisionRouteDemo_StartCompetition(void)
 {
   /* 正式任务与视觉Demo使用同一条已验证链路，避免两套识别策略漂移。 */
-  return StartRoute(1U);
+  return StartRoute(1U, 1U);
+}
+
+uint8_t VisionRouteDemo_StartBeanRescan(void)
+{
+  const WorldPose *pose = WorldMap_GetPose();
+  if (VisionRouteDemo_IsRunning() || HasSafetyFault() || !pose->y_valid ||
+      (pose->station != WORLD_STATION_UPPER_OBSTACLE_BEAN_SCAN) ||
+      (StepperAxis_GetPositionPulses(STEPPER_AXIS_Z) != 0)) return 0U;
+  g_competition_mode = 1U;
+  g_debug_step_scan = 1U;
+  g_retry_active = 1U;
+  g_result_warning = 1U;
+  /* 本次比赛期只补扫一轮；失败后以部分结果结束，不无限循环。 */
+  g_bean_retry_used = 2U;
+  ServoControl_SetAngle(0U, VISION_DEMO_BEAN_A_YAW_DEGREES);
+  CameraTilt_SetDown();
+  K230Link_InvalidateResult();
+  (void)K230Link_SelectTask(K230_TASK_BEAN);
+  BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+                         VISION_DEMO_RESCAN_DWELL_MS, UINT8_MAX);
+  EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_A);
+  return 1U;
 }
 
 static int32_t NumberRowSlotX(uint8_t physical_slot)
@@ -561,24 +648,31 @@ static void ContinueNumberRetry(void)
     return;
   }
   RefreshSurveyMap();
-  if (!NumberMapValid() || !StartBeanRoute()) EnterFault();
+  if (NumberMapValid())
+  {
+    if (!StartBeanRoute()) EnterFault();
+  }
+  else if (g_number_retry_used < 2U) BeginNumberRetry();
+  else
+  {
+    g_result_warning = 1U;
+    if (!StartBeanRoute()) EnterFault();
+  }
 }
 
 static void BeginNumberRetry(void)
 {
-  if (g_number_retry_used)
+  if (g_number_retry_used >= 2U)
   {
-    EnterFault();
+    g_result_warning = 1U;
+    if (!StartBeanRoute()) EnterFault();
     return;
   }
-  g_number_retry_used = 1U;
+  ++g_number_retry_used;
   g_retry_active = 1U;
   g_result_warning = 1U;
-  if (g_survey_map.number_valid_mask == VISION_NUMBER_COMPLETE_MASK)
-  {
-    /* 槽位齐全但语义重复时，整排和两侧全部重新投票。 */
-    memset(g_number_votes, 0, sizeof(g_number_votes));
-  }
+  /* 重复语义保留票数更高者；较弱或平票槽位重新定点采集。 */
+  InvalidateDuplicateVotes(g_number_votes, WORLD_NUMBER_SLOT_COUNT);
   g_rescan_cursor = 1U;
   ContinueNumberRetry();
 }
@@ -918,7 +1012,16 @@ void VisionRouteDemo_Process(void)
         else if (stream == 2U)
         {
           RefreshSurveyMap();
-          if (!NumberMapValid() || !StartBeanRoute()) EnterFault();
+          if (NumberMapValid())
+          {
+            if (!StartBeanRoute()) EnterFault();
+          }
+          else if (g_number_retry_used < 2U) BeginNumberRetry();
+          else
+          {
+            g_result_warning = 1U;
+            if (!StartBeanRoute()) EnterFault();
+          }
         }
       }
       else
@@ -927,7 +1030,16 @@ void VisionRouteDemo_Process(void)
         if (DeadlineExpired())
         {
           RefreshSurveyMap();
-          if (!NumberMapValid() || !StartBeanRoute()) EnterFault();
+          if (NumberMapValid())
+          {
+            if (!StartBeanRoute()) EnterFault();
+          }
+          else if (g_number_retry_used < 2U) BeginNumberRetry();
+          else
+          {
+            g_result_warning = 1U;
+            if (!StartBeanRoute()) EnterFault();
+          }
         }
       }
       break;
@@ -999,18 +1111,15 @@ void VisionRouteDemo_Process(void)
         RefreshSurveyMap();
         if (BeanMapValid())
         {
-          g_retry_active = 0U;
-          EnterState(VISION_ROUTE_DEMO_COMPLETE);
+          FinishBeanScan();
         }
-        else if (!g_bean_retry_used)
+        else if (g_bean_retry_used < 2U)
         {
-          g_bean_retry_used = 1U;
+          ++g_bean_retry_used;
           g_retry_active = 1U;
           g_result_warning = 1U;
-          memset(g_bean_votes, 0, sizeof(g_bean_votes));
-          memset(&g_survey_map.bean_at_slot, 0,
-                 sizeof(g_survey_map.bean_at_slot));
-          g_survey_map.bean_valid_mask = 0U;
+          /* 保留已锁存多数结果，补扫继续累计，避免串口短时无数据清空可信槽。 */
+          InvalidateDuplicateVotes(g_bean_votes, WORLD_BEAN_SLOT_COUNT);
           ServoControl_SetAngle(0U, VISION_DEMO_BEAN_A_YAW_DEGREES);
           if (g_debug_step_scan)
             BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
@@ -1018,10 +1127,167 @@ void VisionRouteDemo_Process(void)
           else g_deadline = HAL_GetTick() + VISION_DEMO_RESCAN_DWELL_MS;
           EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_A);
         }
-        else EnterFault();
+        else
+        {
+          g_result_warning = 1U;
+          FinishBeanScan();
+        }
       }
       break;
     }
+
+    case VISION_ROUTE_DEMO_POST_PREPARE:
+      if (!g_stage_started)
+      {
+        uint8_t motion = MoveAxisTo(STEPPER_AXIS_Z, 0);
+        if (motion == 0U) EnterFault();
+        else if (motion == 2U)
+        {
+          WorldMap_SetAxisPosition(StepperAxis_GetPositionPulses(STEPPER_AXIS_X),
+                                   1U, 0, 1U);
+          EnterState(VISION_ROUTE_DEMO_POST_MOVE_PICK);
+        }
+        else
+        {
+          g_stage_started = 1U;
+          g_deadline = HAL_GetTick() + VISION_DEMO_Z_TIMEOUT_MS;
+        }
+      }
+      else if (AxisReached(STEPPER_AXIS_Z, 0))
+      {
+        WorldMap_SetAxisPosition(StepperAxis_GetPositionPulses(STEPPER_AXIS_X),
+                                 1U, 0, 1U);
+        EnterState(VISION_ROUTE_DEMO_POST_MOVE_PICK);
+      }
+      else if (!StepperAxis_IsPulseMoveActive(STEPPER_AXIS_Z) ||
+               DeadlineExpired()) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_MOVE_PICK:
+      if (!g_stage_started)
+      {
+        g_stage_started = MissionNavigator_StartWithPayload(
+            WORLD_SLOT_BEAN_TOP_LEFT, MISSION_PAYLOAD_EMPTY);
+        if (!g_stage_started) EnterFault();
+      }
+      else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
+        EnterState(VISION_ROUTE_DEMO_POST_PICK);
+      else if (MissionNavigator_GetState() == MISSION_NAV_FAULT) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_PICK:
+      if (!g_stage_started)
+      {
+        g_stage_started = MissionAction_StartPickup(WORLD_SLOT_BEAN_TOP_LEFT);
+        if (!g_stage_started) EnterFault();
+      }
+      else if (MissionAction_GetState() == MISSION_ACTION_DONE)
+        EnterState(VISION_ROUTE_DEMO_POST_MOVE_DROP);
+      else if (MissionAction_GetState() == MISSION_ACTION_FAULT) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_MOVE_DROP:
+      if (!g_stage_started)
+      {
+        /* A到物理4号箱属于跨区导航，MissionNavigator强制经起点换边。 */
+        g_stage_started = MissionNavigator_StartWithPayload(
+            WORLD_SLOT_NUMBER_BOTTOM_LEFT, MISSION_PAYLOAD_LOADED);
+        if (!g_stage_started) EnterFault();
+      }
+      else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
+        EnterState(VISION_ROUTE_DEMO_POST_DROP);
+      else if (MissionNavigator_GetState() == MISSION_NAV_FAULT) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_DROP:
+      if (!g_stage_started)
+      {
+        g_stage_started = MissionAction_StartDrop(WORLD_SLOT_NUMBER_BOTTOM_LEFT);
+        if (!g_stage_started) EnterFault();
+      }
+      else if (MissionAction_GetState() == MISSION_ACTION_DONE)
+        EnterState(VISION_ROUTE_DEMO_POST_RETURN_START);
+      else if (MissionAction_GetState() == MISSION_ACTION_FAULT) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_RETURN_START:
+      if (!g_stage_started)
+      {
+        g_stage_started = MissionNavigator_StartStationWithPayload(
+            WORLD_STATION_START, (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U),
+            MISSION_PAYLOAD_EMPTY);
+        if (!g_stage_started) EnterFault();
+      }
+      else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
+        EnterState(VISION_ROUTE_DEMO_POST_CENTER_X);
+      else if (MissionNavigator_GetState() == MISSION_NAV_FAULT) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_CENTER_X:
+      if (!g_stage_started)
+      {
+        uint8_t motion = MoveAxisTo(
+            STEPPER_AXIS_X, (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U));
+        if (motion == 0U) EnterFault();
+        else if (motion == 2U) g_stage_started = 2U;
+        else
+        {
+          g_stage_started = 1U;
+          g_deadline = HAL_GetTick() + VISION_DEMO_X_MOVE_TIMEOUT_MS;
+        }
+      }
+      if ((g_stage_started == 2U) ||
+          AxisReached(STEPPER_AXIS_X,
+                      (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U)))
+      {
+        AppConfig config;
+        AppConfig_GetSnapshot(&config);
+        WorldMap_SetAxisPosition((int32_t)(STEPPER_X_TRAVEL_PULSES / 2U),
+                                 1U, 0, 1U);
+        ServoControl_SetAngle(0U, config.servo_initial_degrees[0]);
+        ServoControl_SetAngle(1U, config.gripper_closed_degrees);
+        CameraTilt_SetLevel();
+        EnterState(VISION_ROUTE_DEMO_POST_HOME_Z);
+      }
+      else if ((g_stage_started == 1U) &&
+               (!StepperAxis_IsPulseMoveActive(STEPPER_AXIS_X) ||
+                DeadlineExpired())) EnterFault();
+      break;
+
+    case VISION_ROUTE_DEMO_POST_HOME_Z:
+      if (!g_stage_started)
+      {
+        if (PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) != 0U)
+        {
+          EnterFault();
+          break;
+        }
+        if (StepperAxis_MovePulses(STEPPER_AXIS_Z,
+                                   STEPPER_Z_TRAVEL_PULSES, 0U) != HAL_OK)
+          EnterFault();
+        else
+        {
+          g_stage_started = 1U;
+          g_deadline = HAL_GetTick() + VISION_DEMO_Z_TIMEOUT_MS;
+        }
+      }
+      else if (!StepperAxis_IsPulseMoveActive(STEPPER_AXIS_Z))
+      {
+        if ((PhotoSensor_GetState(PHOTO_SENSOR_SHARED_XZ) == 0U) ||
+            !StepperAxis_SetPositionPulses(
+                STEPPER_AXIS_Z, (int32_t)STEPPER_Z_TRAVEL_PULSES))
+          EnterFault();
+        else
+        {
+          WorldMap_SetAxisPosition(
+              (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U), 1U,
+              (int32_t)STEPPER_Z_TRAVEL_PULSES, 1U);
+          WorldMap_SetKnownStation(WORLD_STATION_START);
+          EnterState(VISION_ROUTE_DEMO_COMPLETE);
+        }
+      }
+      else if (DeadlineExpired()) EnterFault();
+      break;
 
     default:
       break;
@@ -1036,7 +1302,7 @@ VisionRouteDemoState VisionRouteDemo_GetState(void)
 uint8_t VisionRouteDemo_IsRunning(void)
 {
   return (g_state >= VISION_ROUTE_DEMO_LIFT_Z) &&
-         (g_state <= VISION_ROUTE_DEMO_SCAN_BEAN_B);
+         (g_state <= VISION_ROUTE_DEMO_POST_HOME_Z);
 }
 
 uint8_t VisionRouteDemo_GetDisplayResult(K230VisionResult *result)
@@ -1224,8 +1490,7 @@ uint8_t VisionRouteDemo_GetResultWarning(void)
 
 uint8_t VisionRouteDemo_IsComplete(void)
 {
-  return (g_state == VISION_ROUTE_DEMO_COMPLETE) &&
-         NumberMapValid() && BeanMapValid();
+  return g_state == VISION_ROUTE_DEMO_COMPLETE;
 }
 
 uint8_t VisionRouteDemo_IsRetrying(void)
@@ -1236,4 +1501,14 @@ uint8_t VisionRouteDemo_IsRetrying(void)
 const VisionSurveyMap *VisionRouteDemo_GetSurveyMap(void)
 {
   return &g_survey_map;
+}
+
+uint8_t VisionRouteDemo_GetNumberTrustedMask(void)
+{
+  return g_survey_map.number_valid_mask;
+}
+
+uint8_t VisionRouteDemo_GetBeanTrustedMask(void)
+{
+  return g_survey_map.bean_valid_mask;
 }

@@ -21,6 +21,8 @@ static uint8_t g_task_index;
 static uint8_t g_start_requested;
 static uint8_t g_action_started;
 static uint8_t g_finish_stage;
+static uint8_t g_runtime_rescan_used;
+static MissionPayloadState g_payload;
 static uint32_t g_missing_calibration;
 
 static void StopMotion(void)
@@ -30,7 +32,9 @@ static void StopMotion(void)
   MissionAction_Abort();
   VisionRouteDemo_Abort();
   ChassisMotion_Stop();
-  StepperAxis_StopAll();
+  StepperAxis_StopMotionPreserveZ();
+  ServoControl_CancelSlew(0U);
+  ServoControl_CancelSlew(1U);
 }
 
 static void EnterState(RobotState state)
@@ -51,6 +55,7 @@ static void EnterState(RobotState state)
 static void EnterFault(RobotFaultCode fault)
 {
   g_fault = fault;
+  g_payload = MISSION_PAYLOAD_UNKNOWN;
   WorldMap_InvalidateAll();
   EnterState(ROBOT_STATE_FAULT);
 }
@@ -108,6 +113,8 @@ void RobotController_Init(void)
   g_task_index = 0U;
   g_start_requested = 0U;
   g_finish_stage = 0U;
+  g_runtime_rescan_used = 0U;
+  g_payload = MISSION_PAYLOAD_EMPTY;
   g_fault = ROBOT_FAULT_NONE;
   g_missing_calibration = MissingCalibration();
   EnterState(ROBOT_STATE_IDLE);
@@ -169,6 +176,8 @@ void RobotController_Update(void)
       {
         WorldMap_SetPoseAtStart();
         g_task_index = 0U;
+        g_runtime_rescan_used = 0U;
+        g_payload = MISSION_PAYLOAD_EMPTY;
         if (!VisionRouteDemo_StartCompetition()) EnterFault(ROBOT_FAULT_VISION);
         else EnterState(ROBOT_STATE_MOVE_TO_NUMBER_SCAN);
       }
@@ -187,7 +196,12 @@ void RobotController_Update(void)
     case ROBOT_STATE_TASK_BUILD:
       if (!MissionPlanner_Build(VisionRouteDemo_GetSurveyMap()))
         EnterFault(ROBOT_FAULT_TASK_MAP);
-      else EnterState(ROBOT_STATE_PREPARE_PICK);
+      else if (MissionPlanner_HasCompleteThreeTasks() &&
+               (MissionPlanner_GetTaskCount() == MISSION_TRANSPORT_TASK_COUNT))
+        EnterState(ROBOT_STATE_PREPARE_PICK);
+      else
+        /* 三种豆类或数字1/2/3仍不唯一时，必须在第一次抓取前停止。 */
+        EnterFault(ROBOT_FAULT_TASK_MAP);
       break;
 
     case ROBOT_STATE_PREPARE_PICK:
@@ -204,9 +218,12 @@ void RobotController_Update(void)
     case ROBOT_STATE_MOVE_TO_PICK:
       task = ActiveTask();
       if (task == 0) EnterFault(ROBOT_FAULT_TASK_MAP);
+      else if (g_payload != MISSION_PAYLOAD_EMPTY)
+        EnterFault(ROBOT_FAULT_ACTION);
       else if (!g_action_started)
       {
-        g_action_started = MissionNavigator_Start(task->pickup_slot);
+        g_action_started = MissionNavigator_StartWithPayload(
+            task->pickup_slot, g_payload);
         if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
       }
       else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
@@ -224,13 +241,27 @@ void RobotController_Update(void)
         if (!g_action_started) EnterFault(ROBOT_FAULT_ACTION);
       }
       else if (MissionAction_GetState() == MISSION_ACTION_DONE)
-        EnterState(ROBOT_STATE_LIFT_SAFE);
+      {
+        AppConfig config;
+        AppConfig_GetSnapshot(&config);
+        if ((StepperAxis_GetPositionPulses(STEPPER_AXIS_Z) != 0) ||
+            (StepperAxis_GetRemainingPulses(STEPPER_AXIS_Z) != 0U) ||
+            !WorldMap_GetPose()->z_valid ||
+            (ServoControl_GetAngle(1U) != config.gripper_closed_degrees))
+          EnterFault(ROBOT_FAULT_ACTION);
+        else
+        {
+          g_payload = MISSION_PAYLOAD_LOADED;
+          EnterState(ROBOT_STATE_LIFT_SAFE);
+        }
+      }
       else if (MissionAction_GetState() == MISSION_ACTION_FAULT)
         EnterFault(ROBOT_FAULT_ACTION);
       break;
 
     case ROBOT_STATE_LIFT_SAFE:
       if ((StepperAxis_GetPositionPulses(STEPPER_AXIS_Z) != 0) ||
+          (StepperAxis_GetRemainingPulses(STEPPER_AXIS_Z) != 0U) ||
           !WorldMap_GetPose()->z_valid) EnterFault(ROBOT_FAULT_Z_COORDINATE);
       else EnterState(ROBOT_STATE_TRANSPORT_VIA_CENTER);
       break;
@@ -238,7 +269,10 @@ void RobotController_Update(void)
     case ROBOT_STATE_TRANSPORT_VIA_CENTER:
       task = ActiveTask();
       if (task == 0) EnterFault(ROBOT_FAULT_TASK_MAP);
-      else if (!MissionNavigator_Start(task->drop_slot))
+      else if (g_payload != MISSION_PAYLOAD_LOADED)
+        EnterFault(ROBOT_FAULT_ACTION);
+      else if (!MissionNavigator_StartWithPayload(
+                   task->drop_slot, g_payload))
         EnterFault(ROBOT_FAULT_NAVIGATION);
       else EnterState(ROBOT_STATE_MOVE_TO_DROP);
       break;
@@ -260,10 +294,73 @@ void RobotController_Update(void)
       }
       else if (MissionAction_GetState() == MISSION_ACTION_DONE)
       {
-        if (g_task_index + 1U < MISSION_TRANSPORT_TASK_COUNT)
+        AppConfig config;
+        AppConfig_GetSnapshot(&config);
+        if ((StepperAxis_GetPositionPulses(STEPPER_AXIS_Z) != 0) ||
+            (StepperAxis_GetRemainingPulses(STEPPER_AXIS_Z) != 0U) ||
+            !WorldMap_GetPose()->z_valid ||
+            (ServoControl_GetAngle(1U) != config.gripper_closed_degrees) ||
+            ServoControl_IsSlewActive(0U))
+          EnterFault(ROBOT_FAULT_ACTION);
+        else
         {
-          ++g_task_index;
-          EnterState(ROBOT_STATE_RETURN_TO_BEAN);
+          g_payload = MISSION_PAYLOAD_EMPTY;
+          MissionPlanner_MarkTaskCompleted(g_task_index);
+          if (g_task_index + 1U < MissionPlanner_GetTaskCount())
+          {
+            ++g_task_index;
+            EnterState(ROBOT_STATE_RETURN_TO_BEAN);
+          }
+          else if ((MissionPlanner_GetSkippedBeanMask() != 0U) &&
+                   !g_runtime_rescan_used)
+          {
+            g_runtime_rescan_used = 1U;
+            EnterState(ROBOT_STATE_RETURN_TO_BEAN_RESCAN);
+          }
+          else
+          {
+            g_finish_stage = 0U;
+            EnterState(ROBOT_STATE_RETURN_FINISH);
+          }
+        }
+      }
+      else if (MissionAction_GetState() == MISSION_ACTION_FAULT)
+        EnterFault(ROBOT_FAULT_ACTION);
+      break;
+
+    case ROBOT_STATE_RETURN_TO_BEAN_RESCAN:
+      if (g_payload != MISSION_PAYLOAD_EMPTY)
+        EnterFault(ROBOT_FAULT_ACTION);
+      else if (!g_action_started)
+      {
+        g_action_started = MissionNavigator_StartStationWithPayload(
+            WORLD_STATION_UPPER_OBSTACLE_BEAN_SCAN,
+            StepperAxis_GetPositionPulses(STEPPER_AXIS_X),
+            g_payload);
+        if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
+      }
+      else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
+      {
+        if (!VisionRouteDemo_StartBeanRescan()) EnterFault(ROBOT_FAULT_VISION);
+        else EnterState(ROBOT_STATE_BEAN_RESCAN);
+      }
+      else if (MissionNavigator_GetState() == MISSION_NAV_FAULT)
+        EnterFault(ROBOT_FAULT_NAVIGATION);
+      break;
+
+    case ROBOT_STATE_BEAN_RESCAN:
+      if (VisionRouteDemo_GetState() == VISION_ROUTE_DEMO_FAULT)
+        EnterFault(ROBOT_FAULT_VISION);
+      else if (VisionRouteDemo_IsComplete())
+      {
+        uint8_t completed = MissionPlanner_GetCompletedBeanMask();
+        if (!MissionPlanner_RebuildRemaining(VisionRouteDemo_GetSurveyMap(),
+                                             completed))
+          EnterFault(ROBOT_FAULT_TASK_MAP);
+        else if (MissionPlanner_GetTaskCount() > 0U)
+        {
+          g_task_index = 0U;
+          EnterState(ROBOT_STATE_PREPARE_PICK);
         }
         else
         {
@@ -271,16 +368,17 @@ void RobotController_Update(void)
           EnterState(ROBOT_STATE_RETURN_FINISH);
         }
       }
-      else if (MissionAction_GetState() == MISSION_ACTION_FAULT)
-        EnterFault(ROBOT_FAULT_ACTION);
       break;
 
     case ROBOT_STATE_RETURN_TO_BEAN:
       task = ActiveTask();
       if (task == 0) EnterFault(ROBOT_FAULT_TASK_MAP);
+      else if (g_payload != MISSION_PAYLOAD_EMPTY)
+        EnterFault(ROBOT_FAULT_ACTION);
       else if (!g_action_started)
       {
-        g_action_started = MissionNavigator_Start(task->pickup_slot);
+        g_action_started = MissionNavigator_StartWithPayload(
+            task->pickup_slot, g_payload);
         if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
       }
       else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
@@ -290,12 +388,15 @@ void RobotController_Update(void)
       break;
 
     case ROBOT_STATE_RETURN_FINISH:
-      if (g_finish_stage == 0U)
+      if (g_payload != MISSION_PAYLOAD_EMPTY)
+        EnterFault(ROBOT_FAULT_ACTION);
+      else if (g_finish_stage == 0U)
       {
         if (!g_action_started)
         {
-          g_action_started = MissionNavigator_StartStation(
-              WORLD_STATION_START, (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U));
+          g_action_started = MissionNavigator_StartStationWithPayload(
+              WORLD_STATION_START, (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U),
+              g_payload);
           if (!g_action_started) EnterFault(ROBOT_FAULT_NAVIGATION);
         }
         else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
@@ -379,6 +480,41 @@ uint8_t RobotController_GetTaskIndex(void)
   return g_task_index;
 }
 
+uint8_t RobotController_GetTaskCount(void)
+{
+  return MissionPlanner_GetTaskCount();
+}
+
+uint8_t RobotController_GetSkippedBeanMask(void)
+{
+  return MissionPlanner_GetSkippedBeanMask();
+}
+
+uint8_t RobotController_GetCompletedBeanMask(void)
+{
+  return MissionPlanner_GetCompletedBeanMask();
+}
+
+MissionPayloadState RobotController_GetPayloadState(void)
+{
+  return g_payload;
+}
+
+MissionRouteType RobotController_GetRouteType(void)
+{
+  return MissionNavigator_GetRoutePlan()->type;
+}
+
+MissionPlanIssue RobotController_GetMissionPlanIssue(void)
+{
+  return MissionPlanner_GetIssue();
+}
+
+uint8_t RobotController_GetMissionPlanIssueMask(void)
+{
+  return MissionPlanner_GetIssueMask();
+}
+
 WorldStationId RobotController_GetCurrentStation(void)
 {
   return WorldMap_GetPose()->station;
@@ -394,6 +530,9 @@ WorldStationId RobotController_GetTargetStation(void)
            WORLD_STATION_UPPER_OBSTACLE_BEAN_SCAN :
            WORLD_STATION_LOWER_OBSTACLE_NUMBER_SCAN;
   }
+  if ((g_state == ROBOT_STATE_RETURN_TO_BEAN_RESCAN) ||
+      (g_state == ROBOT_STATE_BEAN_RESCAN))
+    return WORLD_STATION_UPPER_OBSTACLE_BEAN_SCAN;
   if ((task != 0) && ((g_state == ROBOT_STATE_PREPARE_PICK) ||
       (g_state == ROBOT_STATE_MOVE_TO_PICK) ||
       (g_state == ROBOT_STATE_PICK_ACTION) ||
@@ -413,11 +552,27 @@ RobotFaultCode RobotController_GetFaultCode(void)
   return g_fault;
 }
 
+MissionActionFaultCode RobotController_GetActionFaultCode(void)
+{
+  return MissionAction_GetFaultCode();
+}
+
 const char *RobotController_GetPhaseText(void)
 {
   ChassisAlignmentState alignment = ChassisMotion_GetAlignmentState();
+  MissionNavigatorCrossPhase cross_phase = MissionNavigator_GetCrossPhase();
+  if ((g_state == ROBOT_STATE_DROP_ACTION) &&
+      ServoControl_IsSlewActive(0U)) return "SERVO50";
+  if (MissionNavigator_GetState() == MISSION_NAV_PREALIGN_X)
+    return "中线预对齐";
+  if (cross_phase == MISSION_NAV_CROSS_PHASE_WAIT_ENTRY) return "前往安全区";
+  if (cross_phase == MISSION_NAV_CROSS_PHASE_WAIT_CLEAR) return "等光束恢复";
+  if (cross_phase == MISSION_NAV_CROSS_PHASE_MOVING_X) return "并行换边";
+  if (cross_phase == MISSION_NAV_CROSS_PHASE_WAIT_X_AT_START) return "起点等X";
   if (alignment == CHASSIS_ALIGNMENT_SETTLING) return "停稳检查";
-  if (alignment == CHASSIS_ALIGNMENT_RETURNING) return "15速回退对齐";
+  if (alignment == CHASSIS_ALIGNMENT_RETURNING) return "10速往返对齐";
+  if ((alignment == CHASSIS_ALIGNMENT_RECOVERY_SETTLING) ||
+      (alignment == CHASSIS_ALIGNMENT_RECOVERING)) return "15速恢复";
   switch (g_state)
   {
     case ROBOT_STATE_SELF_CHECK: return "自检";
@@ -431,6 +586,8 @@ const char *RobotController_GetPhaseText(void)
     case ROBOT_STATE_MOVE_TO_DROP: return "过起点";
     case ROBOT_STATE_DROP_ACTION: return "放置";
     case ROBOT_STATE_RETURN_TO_BEAN: return "返回";
+    case ROBOT_STATE_RETURN_TO_BEAN_RESCAN:
+    case ROBOT_STATE_BEAN_RESCAN: return "补识别";
     case ROBOT_STATE_RETURN_FINISH: return "收尾";
     case ROBOT_STATE_FINISHED: return "完成";
     case ROBOT_STATE_FAULT: return "故障";

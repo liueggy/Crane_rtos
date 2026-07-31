@@ -3,11 +3,11 @@
 #include "app_config.h"
 #include "bean_pickup_demo.h"
 #include "chassis_motion.h"
+#include "mission_navigator.h"
 #include "photo_sensor.h"
 #include "safety_manager.h"
 #include "stepper_axis.h"
 
-#define XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS  7000U
 #define XY_WAYPOINT_X_SETTLE_MS               300U
 
 typedef struct
@@ -33,12 +33,9 @@ static XyWaypointId g_selected;
 static XyWaypointId g_current_waypoint;
 static WorldStationId g_current_station;
 static WorldStationId g_target_station;
-static WorldStationId g_leg_target_station;
 static int32_t g_target_x;
-static int32_t g_center_cross_target_x;
 static uint8_t g_reference_valid;
 static uint8_t g_current_waypoint_valid;
-static uint8_t g_cross_zone_pending;
 static uint8_t g_stage_started;
 static uint32_t g_deadline;
 
@@ -57,8 +54,9 @@ static void EnterState(XyWaypointDemoState state)
 static void EnterFault(void)
 {
   ChassisMotion_Stop();
+  MissionNavigator_Abort();
   BeanPickupDemo_Abort();
-  StepperAxis_StopAll();
+  StepperAxis_StopMotionPreserveZ();
   WorldMap_InvalidateY();
   g_reference_valid = 0U;
   g_current_waypoint_valid = 0U;
@@ -73,43 +71,6 @@ static uint8_t LoadSelectedTarget(void)
   if ((slot == 0) || !slot->calibrated) return 0U;
   g_target_station = slot->station;
   g_target_x = slot->gantry_x_pulses;
-  return 1U;
-}
-
-static uint8_t IsBeanZone(WorldStationId station)
-{
-  return station < WORLD_STATION_START;
-}
-
-static uint8_t IsNumberZone(WorldStationId station)
-{
-  return station > WORLD_STATION_START;
-}
-
-static uint8_t StartRouteLeg(WorldStationId destination)
-{
-  uint8_t landmark_count;
-  uint8_t reverse;
-  int16_t rpm = ChassisMotion_GetTargetRpm();
-  if (destination == g_current_station) return 0U;
-  if (rpm <= 0) return 0U;
-  reverse = (destination < g_current_station) ? 1U : 0U;
-  landmark_count = (uint8_t)((destination > g_current_station) ?
-      (destination - g_current_station) :
-      (g_current_station - destination));
-  if (WorldMap_RequiresBlockedAlignment(destination))
-  {
-    if (!ChassisMotion_StartAlignedPhotoLandmarkRoute(
-            reverse, landmark_count, (uint16_t)rpm,
-            (uint16_t)(landmark_count * XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS)))
-      return 0U;
-  }
-  else if (!ChassisMotion_StartPhotoLandmarkRoute(
-               reverse, landmark_count, (uint16_t)rpm,
-               (uint16_t)(landmark_count * XY_WAYPOINT_PER_LANDMARK_TIMEOUT_MS)))
-    return 0U;
-  g_leg_target_station = destination;
-  EnterState(XY_WAYPOINT_DEMO_MOVE_Y);
   return 1U;
 }
 
@@ -131,38 +92,14 @@ static void StartRouteToSelected(void)
     return;
   }
 
-  g_cross_zone_pending =
-      ((IsBeanZone(g_current_station) && IsNumberZone(g_target_station)) ||
-       (IsNumberZone(g_current_station) && IsBeanZone(g_target_station))) ? 1U : 0U;
-  if (g_cross_zone_pending)
-  {
-    if (!StartRouteLeg(WORLD_STATION_START)) EnterFault();
-    return;
-  }
   if (g_target_station == g_current_station)
   {
     StartFinalXSettle();
     return;
   }
-  if (!StartRouteLeg(g_target_station)) EnterFault();
-}
-
-static uint8_t StartCenterCross(void)
-{
-  int32_t current = StepperAxis_GetPositionPulses(STEPPER_AXIS_X);
-  int32_t midpoint = (int32_t)(STEPPER_X_TRAVEL_PULSES / 2U);
-  uint32_t pulses;
-  g_center_cross_target_x = (current < midpoint) ?
-      (int32_t)(STEPPER_X_TRAVEL_PULSES * 3U / 4U) :
-      (int32_t)(STEPPER_X_TRAVEL_PULSES / 4U);
-  pulses = (uint32_t)((current > g_center_cross_target_x) ?
-      (current - g_center_cross_target_x) : (g_center_cross_target_x - current));
-  if (pulses == 0U) return 0U;
-  StepperAxis_SetDirectionReverse(
-      STEPPER_AXIS_X, (current > g_center_cross_target_x) ? 1U : 0U);
-  g_deadline = HAL_GetTick() + XY_WAYPOINT_X_SETTLE_MS;
-  EnterState(XY_WAYPOINT_DEMO_CENTER_X_SETTLE);
-  return 1U;
+  if (!MissionNavigator_StartWithPayload(
+          k_waypoints[g_selected].slot, MISSION_PAYLOAD_EMPTY)) EnterFault();
+  else EnterState(XY_WAYPOINT_DEMO_MOVE_Y);
 }
 
 static uint8_t MoveXToTarget(void)
@@ -197,12 +134,9 @@ void XyWaypointDemo_Init(void)
   g_current_waypoint = XY_WAYPOINT_A;
   g_current_station = WORLD_STATION_START;
   g_target_station = WORLD_STATION_START;
-  g_leg_target_station = WORLD_STATION_START;
   g_target_x = 0;
-  g_center_cross_target_x = 0;
   g_reference_valid = 0U;
   g_current_waypoint_valid = 0U;
-  g_cross_zone_pending = 0U;
   EnterState(XY_WAYPOINT_DEMO_IDLE);
 }
 
@@ -244,12 +178,12 @@ void XyWaypointDemo_HandlePower(void)
 void XyWaypointDemo_Abort(void)
 {
   ChassisMotion_Stop();
+  MissionNavigator_Abort();
   BeanPickupDemo_Abort();
-  StepperAxis_StopAll();
+  StepperAxis_StopMotionPreserveZ();
   /* 中途停止后Y地标不再可信，必须回到起点规定姿态重新建立参考。 */
   g_reference_valid = 0U;
   g_current_waypoint_valid = 0U;
-  g_cross_zone_pending = 0U;
   EnterState(XY_WAYPOINT_DEMO_IDLE);
 }
 
@@ -278,47 +212,11 @@ void XyWaypointDemo_Process(void)
       break;
 
     case XY_WAYPOINT_DEMO_MOVE_Y:
-      if (ChassisMotion_DidRouteSegmentFail()) EnterFault();
-      else if (ChassisMotion_IsRouteSegmentDone())
+      if (MissionNavigator_GetState() == MISSION_NAV_FAULT) EnterFault();
+      else if (MissionNavigator_GetState() == MISSION_NAV_DONE)
       {
-        g_current_station = g_leg_target_station;
-        if (g_cross_zone_pending &&
-            (g_current_station == WORLD_STATION_START))
-        {
-          if (!StartCenterCross()) EnterFault();
-        }
-        else StartFinalXSettle();
-      }
-      break;
-
-    case XY_WAYPOINT_DEMO_CENTER_X_SETTLE:
-      if ((int32_t)(HAL_GetTick() - g_deadline) >= 0)
-      {
-        int32_t current = StepperAxis_GetPositionPulses(STEPPER_AXIS_X);
-        uint32_t pulses = (uint32_t)((current > g_center_cross_target_x) ?
-            (current - g_center_cross_target_x) :
-            (g_center_cross_target_x - current));
-        if ((pulses == 0U) ||
-            (StepperAxis_MovePulses(
-                 STEPPER_AXIS_X, pulses,
-                 (current > g_center_cross_target_x) ? 1U : 0U) != HAL_OK))
-          EnterFault();
-        else EnterState(XY_WAYPOINT_DEMO_CENTER_X_MOVE);
-      }
-      break;
-
-    case XY_WAYPOINT_DEMO_CENTER_X_MOVE:
-      if (!StepperAxis_IsPulseMoveActive(STEPPER_AXIS_X))
-      {
-        if (StepperAxis_GetPositionPulses(STEPPER_AXIS_X) !=
-            g_center_cross_target_x)
-          EnterFault();
-        else
-        {
-          WorldMap_SetAxisPosition(g_center_cross_target_x, 1U, 0, 1U);
-          g_cross_zone_pending = 0U;
-          if (!StartRouteLeg(g_target_station)) EnterFault();
-        }
+        g_current_station = g_target_station;
+        StartFinalXSettle();
       }
       break;
 

@@ -2,6 +2,8 @@
 #define ROBOT_CONTROLLER_H
 
 #include "mission_planner.h"
+#include "mission_navigator.h"
+#include "mission_action.h"
 
 #include <stdint.h>
 
@@ -27,6 +29,8 @@ typedef enum
   ROBOT_STATE_MOVE_TO_DROP,
   ROBOT_STATE_DROP_ACTION,
   ROBOT_STATE_RETURN_TO_BEAN,
+  ROBOT_STATE_RETURN_TO_BEAN_RESCAN,
+  ROBOT_STATE_BEAN_RESCAN,
   ROBOT_STATE_RETURN_FINISH,
   ROBOT_STATE_FINISHED,
   ROBOT_STATE_FAULT
@@ -63,9 +67,17 @@ RobotState RobotController_GetState(void);
 uint32_t RobotController_GetMissingCalibrationMask(void);
 const MissionTransportTask *RobotController_GetActiveTask(void);
 uint8_t RobotController_GetTaskIndex(void);
+uint8_t RobotController_GetTaskCount(void);
+uint8_t RobotController_GetSkippedBeanMask(void);
+uint8_t RobotController_GetCompletedBeanMask(void);
+MissionPayloadState RobotController_GetPayloadState(void);
+MissionRouteType RobotController_GetRouteType(void);
+MissionPlanIssue RobotController_GetMissionPlanIssue(void);
+uint8_t RobotController_GetMissionPlanIssueMask(void);
 WorldStationId RobotController_GetCurrentStation(void);
 WorldStationId RobotController_GetTargetStation(void);
 RobotFaultCode RobotController_GetFaultCode(void);
+MissionActionFaultCode RobotController_GetActionFaultCode(void);
 const char *RobotController_GetPhaseText(void);
 
 #endif

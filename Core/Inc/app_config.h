@@ -14,10 +14,11 @@
 #define STEPPER_X_TRAVEL_MM_X10          16930U
 #define STEPPER_X_SAFE_MARGIN_PULSES       500U
 #define STEPPER_X_SAFE_TRAVEL_PULSES     33424U
-#define STEPPER_Z_TRAVEL_PULSES           5784U
-#define STEPPER_Z_TRAVEL_MM_X10           2810U
+#define STEPPER_Z_TRAVEL_PULSES           6093U
+#define STEPPER_Z_TRAVEL_MM_X10           2960U
 #define STEPPER_Z_SAFE_MARGIN_PULSES       200U
-#define STEPPER_Z_SAFE_TRAVEL_PULSES      5584U
+#define STEPPER_Z_SAFE_TRAVEL_PULSES \
+  (STEPPER_Z_TRAVEL_PULSES - STEPPER_Z_SAFE_MARGIN_PULSES)
 
 /* 识别阶段夹爪离地75mm即可随底盘移动，无需升到Z轴机械最高点。 */
 #define RECOGNITION_CLEARANCE_MM_X10        750U
@@ -47,11 +48,12 @@
  * Z轴抓放高度实机标定值（+Z向下）。
  * 豆子点位1=中间凸出箱，点位2=顶部右箱，点位3=顶部左箱。
  */
-#define BEAN_PICKUP_Z_LEVEL_1_PULSES        2500
+#define BEAN_PICKUP_Z_LEVEL_1_PULSES        2809
 /* 3号遥控点位实机避险：较原3600上移约15.06mm（310脉冲）。 */
-#define BEAN_PICKUP_Z_LEVEL_2_PULSES        3290
-#define BEAN_PICKUP_Z_LEVEL_3_PULSES        4300
-#define NUMBER_DROP_Z_PULSES                3300
+#define BEAN_PICKUP_Z_LEVEL_2_PULSES        3599
+/* A箱最低抓取点上调约15.1mm（减少310脉冲），避免顶起箱架。 */
+#define BEAN_PICKUP_Z_LEVEL_3_PULSES        4299
+#define NUMBER_DROP_Z_PULSES                3609
 /* 比最高抓取层再高约9.7mm，给横移和张爪留出余量。 */
 #define BEAN_PICKUP_PREP_MARGIN_PULSES        200
 #define BEAN_PICKUP_PREP_Z_PULSES \

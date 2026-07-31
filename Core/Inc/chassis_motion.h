@@ -11,7 +11,9 @@ typedef enum
 {
   CHASSIS_ALIGNMENT_NONE = 0,
   CHASSIS_ALIGNMENT_SETTLING,
-  CHASSIS_ALIGNMENT_RETURNING
+  CHASSIS_ALIGNMENT_RETURNING,
+  CHASSIS_ALIGNMENT_RECOVERY_SETTLING,
+  CHASSIS_ALIGNMENT_RECOVERING
 } ChassisAlignmentState;
 
 void ChassisMotion_Init(void);
@@ -57,8 +59,8 @@ uint8_t ChassisMotion_StartAlignedRouteThroughLandmarks(int16_t distance_mm,
                                                         uint8_t landmark_count,
                                                         uint16_t speed_rpm,
                                                         uint16_t timeout_ms);
-/* 已越过目标挡板后的低速回退对齐：启动时已遮挡的一侧直接计为已对齐，
- * 其余侧重新进入遮挡后，双侧同时停车。 */
+/* 已越过目标挡板后的低速往返微调：每侧进入遮挡后单独停止；停稳后若
+ * 任一侧再次滑出，则反向继续微调，直到双侧当前均被遮挡。 */
 uint8_t ChassisMotion_StartPhotoBlockedAlignment(uint8_t reverse,
                                                  uint16_t speed_rpm,
                                                  uint16_t timeout_ms);

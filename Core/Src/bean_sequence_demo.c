@@ -10,7 +10,7 @@
 #include "world_map.h"
 
 #define BEAN_SEQUENCE_NOMINAL_RPM              50U
-#define BEAN_SEQUENCE_AC_ALIGN_RPM              15U
+#define BEAN_SEQUENCE_AC_ALIGN_RPM              10U
 #define BEAN_SEQUENCE_AC_ALIGN_TIMEOUT_MS      5000U
 #define BEAN_SEQUENCE_START_TO_B_MM           1796
 #define BEAN_SEQUENCE_START_TO_B_LANDMARKS       3U
@@ -58,7 +58,7 @@ static void EnterFault(void)
 {
   ChassisMotion_Stop();
   BeanPickupDemo_Abort();
-  StepperAxis_StopAll();
+  StepperAxis_StopMotionPreserveZ();
   EnterState(BEAN_SEQUENCE_DEMO_FAULT);
 }
 
@@ -172,7 +172,7 @@ void BeanSequenceDemo_Abort(void)
 {
   ChassisMotion_Stop();
   BeanPickupDemo_Abort();
-  StepperAxis_StopAll();
+  StepperAxis_StopMotionPreserveZ();
   EnterState(BEAN_SEQUENCE_DEMO_IDLE);
 }
 

@@ -39,6 +39,8 @@ uint8_t StepperAxis_IsPhotoLimitOwnedBy(StepperAxisId axis);
 void StepperAxis_ProcessPhotoInterlock(void);
 /* 安全停机：关闭脉冲并释放两路驱动器，不保留静态转矩。 */
 void StepperAxis_StopAll(void);
+/* 停止脉冲但维持Z轴静态保持；用于任务故障和软件急停。 */
+void StepperAxis_StopMotionPreserveZ(void);
 void StepperAxis_UpdateTelemetry(void);
 
 #endif

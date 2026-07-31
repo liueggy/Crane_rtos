@@ -18,7 +18,7 @@ void SafetyManager_TriggerEstop(void)
   AppState_SetEstopActive(1U);
   AppState_SetFaultFlags(g_flags);
   ChassisMotion_Stop();
-  StepperAxis_StopAll();
+  StepperAxis_StopMotionPreserveZ();
 }
 
 void SafetyManager_HandleExti(uint16_t gpio_pin)
@@ -34,7 +34,7 @@ void SafetyManager_HandleExti(uint16_t gpio_pin)
   {
     g_flags |= limit | SAFETY_FAULT_LIMIT;
     AppState_SetFaultFlags(g_flags);
-    StepperAxis_StopAll();
+    StepperAxis_StopMotionPreserveZ();
   }
 }
 

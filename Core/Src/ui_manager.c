@@ -98,11 +98,11 @@ static const char *BeanSequenceDemoStateText(BeanSequenceDemoState state)
       if (ChassisMotion_GetAlignmentState() == CHASSIS_ALIGNMENT_SETTLING)
         return "停稳检查";
       if (ChassisMotion_GetAlignmentState() == CHASSIS_ALIGNMENT_RETURNING)
-        return "15速回退对齐";
+        return "10速往返对齐";
       return "前往B";
     case BEAN_SEQUENCE_DEMO_PICK_B: return "抓B";
     case BEAN_SEQUENCE_DEMO_MOVE_TO_AC: return "直达AC";
-    case BEAN_SEQUENCE_DEMO_ALIGN_AC: return "15速回退对齐";
+    case BEAN_SEQUENCE_DEMO_ALIGN_AC: return "10速往返对齐";
     case BEAN_SEQUENCE_DEMO_PICK_C: return "抓C";
     case BEAN_SEQUENCE_DEMO_PICK_A: return "抓A";
     case BEAN_SEQUENCE_DEMO_HOLD: return "保持4秒";
@@ -122,7 +122,7 @@ static const char *XyWaypointDemoStateText(XyWaypointDemoState state)
   {
     ChassisAlignmentState alignment = ChassisMotion_GetAlignmentState();
     if (alignment == CHASSIS_ALIGNMENT_SETTLING) return "停稳检查";
-    if (alignment == CHASSIS_ALIGNMENT_RETURNING) return "15速回退对齐";
+    if (alignment == CHASSIS_ALIGNMENT_RETURNING) return "10速往返对齐";
   }
   switch (state)
   {
@@ -215,6 +215,14 @@ static const char *VisionRouteDemoStateText(VisionRouteDemoState state)
     case VISION_ROUTE_DEMO_MOVE_BEAN: return "豆子移动";
     case VISION_ROUTE_DEMO_SCAN_BEAN_A:
     case VISION_ROUTE_DEMO_SCAN_BEAN_B: return "豆子识别";
+    case VISION_ROUTE_DEMO_POST_PREPARE: return "抓取准备";
+    case VISION_ROUTE_DEMO_POST_MOVE_PICK: return "前往A箱";
+    case VISION_ROUTE_DEMO_POST_PICK: return "抓取A箱";
+    case VISION_ROUTE_DEMO_POST_MOVE_DROP: return "绕障前往4";
+    case VISION_ROUTE_DEMO_POST_DROP: return "竖放4号箱";
+    case VISION_ROUTE_DEMO_POST_RETURN_START: return "返回起点";
+    case VISION_ROUTE_DEMO_POST_CENTER_X: return "X轴居中";
+    case VISION_ROUTE_DEMO_POST_HOME_Z: return "Z轴触底";
     case VISION_ROUTE_DEMO_COMPLETE: return "完成";
     case VISION_ROUTE_DEMO_FAULT: return "故障";
     case VISION_ROUTE_DEMO_IDLE:
@@ -257,6 +265,62 @@ static const char *RobotFaultText(RobotFaultCode fault)
     case ROBOT_FAULT_NONE:
     default: return "无";
   }
+}
+
+static const char *ActionFaultText(MissionActionFaultCode fault)
+{
+  switch (fault)
+  {
+    case MISSION_ACTION_FAULT_SAFETY: return "SAFE";
+    case MISSION_ACTION_FAULT_Z_TOP: return "ZTOP";
+    case MISSION_ACTION_FAULT_X_MOVE: return "XMOVE";
+    case MISSION_ACTION_FAULT_Z_MOVE: return "ZMOVE";
+    case MISSION_ACTION_FAULT_PB11_OWNER: return "PB11";
+    case MISSION_ACTION_FAULT_SERVO_TIMEOUT: return "SERVO";
+    case MISSION_ACTION_FAULT_PULSE_INCOMPLETE: return "PULSE";
+    case MISSION_ACTION_FAULT_SLOT: return "SLOT";
+    case MISSION_ACTION_FAULT_NONE:
+    default: return "NONE";
+  }
+}
+
+static const char *MissionPlanIssueText(MissionPlanIssue issue)
+{
+  switch (issue)
+  {
+    case MISSION_PLAN_BEAN_MISSING: return "豆缺";
+    case MISSION_PLAN_BEAN_CONFLICT: return "豆冲突";
+    case MISSION_PLAN_NUMBER_MISSING: return "数缺";
+    case MISSION_PLAN_NUMBER_CONFLICT: return "数冲突";
+    case MISSION_PLAN_TASK_COUNT_INVALID: return "任务数错";
+    case MISSION_PLAN_OK:
+    default: return "无";
+  }
+}
+
+static const char *PayloadShortText(MissionPayloadState payload)
+{
+  return (payload == MISSION_PAYLOAD_LOADED) ? "豆" :
+         (payload == MISSION_PAYLOAD_EMPTY) ? "空" : "?";
+}
+
+static const char *RouteShortText(MissionRouteType type)
+{
+  switch (type)
+  {
+    case MISSION_ROUTE_LOADED_CENTER: return "中间";
+    case MISSION_ROUTE_EMPTY_LEFT_DIRECT: return "左直";
+    case MISSION_ROUTE_EMPTY_RIGHT_DIRECT: return "右直";
+    case MISSION_ROUTE_EMPTY_CENTER_CROSS: return "换边";
+    case MISSION_ROUTE_SAME_ZONE:
+    default: return "同区";
+  }
+}
+
+static char LaneShortChar(MissionRouteLane lane)
+{
+  return (lane == MISSION_LANE_LEFT) ? 'L' :
+         (lane == MISSION_LANE_RIGHT) ? 'R' : '-';
 }
 
 static void FormatNumberVisionLine(const K230VisionResult *vision,
@@ -684,28 +748,56 @@ void UiManager_Render(void)
       const MissionTransportTask *task = RobotController_GetActiveTask();
       const WorldPose *pose = WorldMap_GetPose();
       uint8_t task_index = RobotController_GetTaskIndex();
+      uint8_t task_count = RobotController_GetTaskCount();
       DrawHeader("比赛运行");
       if (task != NULL)
-        (void)snprintf(line, sizeof(line), "任务:%u/3 %c->数字%u",
+        (void)snprintf(line, sizeof(line), "任务:%u/%u %c->数字%u",
                        (unsigned)(task_index + 1U),
-                       (char)('A' + task_index),
+                       (unsigned)task_count,
+                       (char)('A' + task->physical_bean_slot),
                        (unsigned)task->target_number);
       else
-        (void)snprintf(line, sizeof(line), "任务:%u/3 待识别",
-                       (unsigned)(task_index + 1U));
+        (void)snprintf(line, sizeof(line), "任务:0/%u 跳:%X",
+                       (unsigned)task_count,
+                       (unsigned)RobotController_GetSkippedBeanMask());
       DrawLine(16, line);
       (void)snprintf(line, sizeof(line), "阶段:%s S%u>S%u",
                      RobotController_GetPhaseText(),
                      (unsigned)RobotController_GetCurrentStation(),
                      (unsigned)RobotController_GetTargetStation());
       DrawLine(32, line);
-      if (RobotController_GetState() == ROBOT_STATE_FAULT)
-        (void)snprintf(line, sizeof(line), "故障:%s",
-                       RobotFaultText(RobotController_GetFaultCode()));
-      else
-        (void)snprintf(line, sizeof(line), "坐标:X%c Y%c Z%c PWR/0",
+      if ((RobotController_GetState() == ROBOT_STATE_FAULT) &&
+          (RobotController_GetFaultCode() == ROBOT_FAULT_TASK_MAP))
+        (void)snprintf(line, sizeof(line), "映射:%s M%X",
+                       MissionPlanIssueText(
+                           RobotController_GetMissionPlanIssue()),
+                       (unsigned)RobotController_GetMissionPlanIssueMask());
+      else if (RobotController_GetState() == ROBOT_STATE_FAULT)
+      {
+        if (RobotController_GetFaultCode() == ROBOT_FAULT_ACTION)
+          (void)snprintf(line, sizeof(line), "故障:%s",
+                         ActionFaultText(RobotController_GetActionFaultCode()));
+        else
+          (void)snprintf(line, sizeof(line), "故障:%s",
+                         RobotFaultText(RobotController_GetFaultCode()));
+      }
+      else if (RobotController_GetSkippedBeanMask() != 0U)
+        (void)snprintf(line, sizeof(line), "完:%X 跳:%X X%cY%cZ%c",
+                       (unsigned)RobotController_GetCompletedBeanMask(),
+                       (unsigned)RobotController_GetSkippedBeanMask(),
                        pose->x_valid ? '+' : '-', pose->y_valid ? '+' : '-',
                        pose->z_valid ? '+' : '-');
+      else
+      {
+        const MissionRoutePlan *route = MissionNavigator_GetRoutePlan();
+        (void)snprintf(line, sizeof(line), "%s %s %c>%c X%cY%cZ%c",
+                       PayloadShortText(RobotController_GetPayloadState()),
+                       RouteShortText(RobotController_GetRouteType()),
+                       LaneShortChar(route->entry_lane),
+                       LaneShortChar(route->exit_lane),
+                       pose->x_valid ? '+' : '-', pose->y_valid ? '+' : '-',
+                       pose->z_valid ? '+' : '-');
+      }
       DrawLine(48, line);
       break;
     }

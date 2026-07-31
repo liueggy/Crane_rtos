@@ -370,6 +370,29 @@ void StepperAxis_StopAll(void)
   }
 }
 
+void StepperAxis_StopMotionPreserveZ(void)
+{
+  for (uint8_t axis = 0U; axis < STEPPER_AXIS_COUNT; ++axis)
+  {
+    StepperAxisId id = (StepperAxisId)axis;
+    g_enabled[axis] = 0U;
+    CancelPulseMove(id);
+    if (g_timer != NULL)
+      __HAL_TIM_SET_COMPARE(g_timer, AxisChannel(id), 0U);
+    if (id == STEPPER_AXIS_Z)
+    {
+      g_holding[axis] = 1U;
+      g_has_run[axis] = 1U;
+      WriteEnable(id, 1U);
+    }
+    else
+    {
+      g_holding[axis] = 0U;
+      WriteEnable(id, 0U);
+    }
+  }
+}
+
 void StepperAxis_UpdateTelemetry(void)
 {
   AppState_SetStepperTelemetry(g_enabled[STEPPER_AXIS_Z], g_reverse[STEPPER_AXIS_Z],

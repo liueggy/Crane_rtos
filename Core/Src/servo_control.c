@@ -6,6 +6,10 @@ static TIM_HandleTypeDef *g_timer;
 static uint16_t g_pulse_us[2] = {1000U, 1000U};
 static uint16_t g_angle[2];
 static int8_t g_step_direction[2] = {1, 1};
+static uint8_t g_slew_active[2];
+static uint16_t g_slew_target[2];
+static uint16_t g_slew_interval_ms[2];
+static uint32_t g_slew_next_tick[2];
 
 static uint16_t ClampPulse(uint8_t index, uint16_t pulse_us)
 {
@@ -20,6 +24,13 @@ static uint16_t ClampPulse(uint8_t index, uint16_t pulse_us)
 void ServoControl_Init(TIM_HandleTypeDef *timer)
 {
   g_timer = timer;
+  for (uint8_t i = 0U; i < 2U; ++i)
+  {
+    g_slew_active[i] = 0U;
+    g_slew_target[i] = 0U;
+    g_slew_interval_ms[i] = 20U;
+    g_slew_next_tick[i] = 0U;
+  }
 }
 
 void ServoControl_SetPulseUs(uint8_t index, uint16_t pulse_us)
@@ -31,7 +42,7 @@ void ServoControl_SetPulseUs(uint8_t index, uint16_t pulse_us)
   __HAL_TIM_SET_COMPARE(g_timer, channel, g_pulse_us[index]);
 }
 
-void ServoControl_SetAngle(uint8_t index, uint16_t angle)
+static void ApplyAngle(uint8_t index, uint16_t angle)
 {
   AppConfig config;
   uint16_t maximum_logical_angle;
@@ -51,6 +62,67 @@ void ServoControl_SetAngle(uint8_t index, uint16_t angle)
           config.servo_travel_degrees[index];
   ServoControl_SetPulseUs(index, (uint16_t)pulse);
   g_angle[index] = angle;
+}
+
+void ServoControl_SetAngle(uint8_t index, uint16_t angle)
+{
+  if (index >= 2U) return;
+  g_slew_active[index] = 0U;
+  ApplyAngle(index, angle);
+}
+
+uint8_t ServoControl_StartSlew(uint8_t index, uint16_t target_angle,
+                               uint16_t degrees_per_second)
+{
+  AppConfig config;
+  if ((index >= 2U) || (degrees_per_second == 0U)) return 0U;
+  AppConfig_GetSnapshot(&config);
+  if (target_angle < config.servo_command_min_degrees[index])
+    target_angle = config.servo_command_min_degrees[index];
+  if (target_angle > config.servo_command_max_degrees[index])
+    target_angle = config.servo_command_max_degrees[index];
+  g_slew_target[index] = target_angle;
+  g_slew_interval_ms[index] = (uint16_t)(1000U / degrees_per_second);
+  if (g_slew_interval_ms[index] == 0U) g_slew_interval_ms[index] = 1U;
+  g_slew_next_tick[index] = HAL_GetTick() + g_slew_interval_ms[index];
+  g_slew_active[index] = (g_angle[index] != target_angle) ? 1U : 0U;
+  return 1U;
+}
+
+void ServoControl_Process(void)
+{
+  uint32_t now = HAL_GetTick();
+  for (uint8_t index = 0U; index < 2U; ++index)
+  {
+    uint8_t steps = 0U;
+    while (g_slew_active[index] &&
+           ((int32_t)(now - g_slew_next_tick[index]) >= 0) &&
+           (steps < 8U))
+    {
+      uint16_t next = g_angle[index];
+      if (next < g_slew_target[index]) ++next;
+      else if (next > g_slew_target[index]) --next;
+      ApplyAngle(index, next);
+      g_slew_next_tick[index] += g_slew_interval_ms[index];
+      ++steps;
+      if (next == g_slew_target[index]) g_slew_active[index] = 0U;
+    }
+  }
+}
+
+void ServoControl_CancelSlew(uint8_t index)
+{
+  if (index < 2U) g_slew_active[index] = 0U;
+}
+
+uint8_t ServoControl_IsSlewActive(uint8_t index)
+{
+  return (index < 2U) ? g_slew_active[index] : 0U;
+}
+
+uint16_t ServoControl_GetSlewTarget(uint8_t index)
+{
+  return (index < 2U) ? g_slew_target[index] : 0U;
 }
 
 void ServoControl_ResetToInitial(uint8_t index)
