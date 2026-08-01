@@ -28,7 +28,8 @@
 #define VISION_DEMO_NUMBER_YAW_DEGREES         0U
 #define VISION_DEMO_NUMBER_SIDE_YAW_DEGREES   54U
 #define VISION_DEMO_BEAN_A_YAW_DEGREES       180U
-#define VISION_DEMO_BEAN_B_YAW_DEGREES       194U
+#define VISION_DEMO_BEAN_B_YAW_DEGREES       220U
+#define VISION_DEMO_BEAN_SIDE_SETTLE_MS       900U
 #define VISION_DEMO_DISPLAY_WIDTH             640U
 #define VISION_DEMO_STABLE_HITS                  2U
 #define VISION_DEMO_ROW_SLOT_WINDOW_PULSES     4000U
@@ -87,6 +88,8 @@ static void AcceptBeanPoseFrame(const K230VisionResult *result, uint8_t slot);
 static void RefreshSurveyMap(void);
 static uint8_t NumberSemanticUsedByOtherSlot(uint8_t semantic,
                                              uint8_t physical_slot);
+static uint8_t BeanSemanticUsedByOtherSlot(uint8_t semantic,
+                                           uint8_t physical_slot);
 static uint8_t NumberMapValid(void);
 static uint8_t BeanMapValid(void);
 static void BeginNumberRetry(void);
@@ -447,6 +450,9 @@ static void AcceptDebugNumberFrame(uint8_t physical_slot)
 
 static void AcceptDebugBeanFrame(uint8_t physical_slot)
 {
+  static const uint8_t semantics[3] = {
+    K230_SEMANTIC_BEAN_L, K230_SEMANTIC_BEAN_H, K230_SEMANTIC_BEAN_B
+  };
   K230VisionResult result;
   uint16_t best_count = 0U;
   uint8_t best_index = UINT8_MAX;
@@ -465,6 +471,7 @@ static void AcceptDebugBeanFrame(uint8_t physical_slot)
                     (semantic == K230_SEMANTIC_BEAN_H) ? 1U :
                     (semantic == K230_SEMANTIC_BEAN_B) ? 2U : UINT8_MAX;
     if ((index < 3U) &&
+        !BeanSemanticUsedByOtherSlot(semantic, physical_slot) &&
         (g_debug_bean_counts[physical_slot][index] < UINT16_MAX))
       ++g_debug_bean_counts[physical_slot][index];
   }
@@ -478,6 +485,7 @@ static void AcceptDebugBeanFrame(uint8_t physical_slot)
   for (uint8_t index = 0U; index < 3U; ++index)
   {
     uint16_t count = g_debug_bean_counts[physical_slot][index];
+    if (BeanSemanticUsedByOtherSlot(semantics[index], physical_slot)) continue;
     if (count > best_count)
     {
       best_count = count;
@@ -485,14 +493,13 @@ static void AcceptDebugBeanFrame(uint8_t physical_slot)
     }
   }
   if ((current_index < 3U) &&
+      !BeanSemanticUsedByOtherSlot(g_bean_votes[physical_slot].candidate,
+                                   physical_slot) &&
       (g_debug_bean_counts[physical_slot][current_index] == best_count))
     best_index = current_index;
 
   if ((best_count != 0U) && (best_index < 3U))
   {
-    static const uint8_t semantics[3] = {
-      K230_SEMANTIC_BEAN_L, K230_SEMANTIC_BEAN_H, K230_SEMANTIC_BEAN_B
-    };
     g_bean_votes[physical_slot].candidate = semantics[best_index];
     g_bean_votes[physical_slot].hits =
         (best_count > UINT8_MAX) ? UINT8_MAX : (uint8_t)best_count;
@@ -1080,7 +1087,7 @@ void VisionRouteDemo_Process(void)
         else if (stream == 2U)
         {
           ServoControl_SetAngle(0U, VISION_DEMO_BEAN_B_YAW_DEGREES);
-          BeginDebugStreamWindow(VISION_DEMO_POINT_SETTLE_MS,
+          BeginDebugStreamWindow(VISION_DEMO_BEAN_SIDE_SETTLE_MS,
               g_retry_active ? VISION_DEMO_RESCAN_DWELL_MS :
                                VISION_DEMO_POINT_DWELL_MS,
               UINT8_MAX);
@@ -1093,8 +1100,10 @@ void VisionRouteDemo_Process(void)
         if (DeadlineExpired())
         {
           ServoControl_SetAngle(0U, VISION_DEMO_BEAN_B_YAW_DEGREES);
-          g_deadline = HAL_GetTick() + (g_retry_active ?
+          g_not_before_tick = HAL_GetTick() + VISION_DEMO_BEAN_SIDE_SETTLE_MS;
+          g_deadline = g_not_before_tick + (g_retry_active ?
                        VISION_DEMO_RESCAN_DWELL_MS : VISION_DEMO_POINT_DWELL_MS);
+          K230Link_InvalidateResult();
           EnterState(VISION_ROUTE_DEMO_SCAN_BEAN_B);
         }
       }
@@ -1115,7 +1124,7 @@ void VisionRouteDemo_Process(void)
       }
       else
       {
-        AcceptLatestFrame(K230_TASK_BEAN);
+        if (TimeReached(g_not_before_tick)) AcceptLatestFrame(K230_TASK_BEAN);
         capture_done = DeadlineExpired();
       }
       if (capture_done)
@@ -1356,11 +1365,23 @@ static void AcceptBeanPoseFrame(const K230VisionResult *result, uint8_t slot)
   {
     const K230VisionTarget *target = &result->targets[i];
     if (!IsExpectedSemantic(K230_TASK_BEAN, target->semantic)) continue;
+    if (BeanSemanticUsedByOtherSlot(target->semantic, slot)) continue;
     if ((best == NULL) ||
         (target->confidence_percent > best->confidence_percent)) best = target;
   }
   if (best != NULL)
     AcceptVote(&g_bean_votes[slot], best->semantic, best->confidence_percent);
+}
+
+static uint8_t BeanSemanticUsedByOtherSlot(uint8_t semantic,
+                                           uint8_t physical_slot)
+{
+  for (uint8_t slot = 0U; slot < 2U; ++slot)
+  {
+    if ((slot != physical_slot) && g_bean_votes[slot].stable &&
+        (g_bean_votes[slot].candidate == semantic)) return 1U;
+  }
+  return 0U;
 }
 
 static void RefreshSurveyMap(void)
@@ -1370,6 +1391,8 @@ static void RefreshSurveyMap(void)
   uint8_t missing_slot = 2U;
   /* 物理1号从不直接采集，每次都根据2/3/4/5当前锁存结果重算。 */
   memset(&g_number_votes[0], 0, sizeof(g_number_votes[0]));
+  /* 第三种豆类只允许由A/B的互斥结果推导，避免补扫沿用旧推导值。 */
+  memset(&g_bean_votes[2], 0, sizeof(g_bean_votes[2]));
   memset(&g_survey_map, 0, sizeof(g_survey_map));
   g_survey_map.last_sequence = g_last_sequence;
   for (uint8_t slot = 0U; slot < 5U; ++slot)
